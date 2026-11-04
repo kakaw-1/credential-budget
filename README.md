@@ -36,10 +36,28 @@
 
 ### 插件商店
 
-CPA / OMC 的插件商店搜索 `credential-budget` 安装，然后在插件配置里启用。商店地址可以加：
+**1. 把商店源加进去。** 在 CPA 的 `config.yaml` 里：
 
+```yaml
+plugins:
+  enabled: true
+  dir: "plugins"
+  store-sources:
+    - "https://raw.githubusercontent.com/kakaw-1/credential-budget/main/registry.json"
 ```
-https://raw.githubusercontent.com/kakaw-1/credential-budget/main/registry.json
+
+或者用控制台：Settings → Plugin store → 添加源，填同一个地址。
+
+**2. 商店里搜 `credential-budget` → 安装。** 安装对话框要你手打一次 id 确认（这是 CPA 的规矩：确认的是"要在这个进程里跑代码"，不是确认来源）；装完插件会热加载，`restart_required: false`。
+
+**3. 启用**，见下方"启用"一节。
+
+也可以直接调接口装：
+
+```sh
+curl -X POST http://127.0.0.1:8317/v8/management/plugins/store/credential-budget/install \
+  -H "Authorization: Bearer $MANAGEMENT_KEY" -H 'Content-Type: application/json' \
+  -d '{"version":"0.1.0"}'
 ```
 
 ### 手动安装
