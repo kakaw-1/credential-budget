@@ -68,6 +68,25 @@ POST /v1/chat/completions 500 {"error":{"message":"credential_budget_exhausted: 
 
 宿主侧的行为由 CPA 自己的测试保证（`internal/pluginhost/auth_callbacks_test.go::TestHostAuthSaveCallbackPreservesDisabledState`：写入 `disabled:true` 后运行时记录变为 `StatusDisabled`，再写 `false` 回到 `StatusActive`），而路由层会排除 disabled 凭证（`conductor_selection.go:1106`）。
 
+## 第二轮：provider_limits、备注名、分组
+
+配置改为 `provider_limits: {openai-compatible-mock: 0.005}`（不再设 `default_limit_usd`），重启后跑三个请求：
+
+```
+credential openai-compatibility:mock:68bc4482762f limit 0.005 source provider_default spent 0.006 exhausted
+credential openai-compatibility:mock:82906d360369 limit 0.005 source provider_default spent 0.003 limited
+groups [{count: 2, exhausted: 1, limited: 2, provider: openai-compatible-mock, spent_usd: 0.009}]
+```
+
+两条**新出现**的凭证都自动拿到 $0.005，`limit_source` 记为 `provider_default`，不需要在面板点任何东西。
+
+再给两条 key 设备注名（`POST /alias`），面板随即以备注为主标题、base-url 与 ID 尾号作次要行：
+
+```
+5刀-A          http://127.0.0.1:9099/v1 · #fe336a     $0.006 / $0.005   已停用
+5刀-B 备用      http://127.0.0.1:9099/v1 · #9c2bc6     $0.003 / $0.005   限额中
+```
+
 ## 单元测试
 
 ```
@@ -80,10 +99,12 @@ $ go test -race ./...
 === RUN   TestSkipPolicyChargesNothingButCounts          --- PASS
 === RUN   TestCachedTokensAreNotBilledTwice              --- PASS
 === RUN   TestUsageWithoutTokensIsIgnored                --- PASS
+=== RUN   TestProviderLimitsSeedNewCredentialsOnly       --- PASS
+=== RUN   TestAliasNamesACredential                      --- PASS
 === RUN   TestLedgerSurvivesReload                       --- PASS
 === RUN   TestLimitEditReportsPendingUnseal              --- PASS
 PASS
-ok  github.com/kakaw-1/cpa-plugin-credential-budget/internal/plugin  1.047s
+ok  github.com/kakaw-1/cpa-plugin-credential-budget/internal/plugin  1.064s
 ```
 
 ## 未覆盖

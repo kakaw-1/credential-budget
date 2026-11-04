@@ -246,8 +246,8 @@ auto_disable: false
 	})
 	raw := handlePick(request)
 	var envelope struct {
-		OK     bool                   `json:"ok"`
-		Result schedulerPickResponse  `json:"result"`
+		OK     bool                  `json:"ok"`
+		Result schedulerPickResponse `json:"result"`
 	}
 	if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
 		t.Fatalf("decode pick response: %v", errUnmarshal)
@@ -258,7 +258,7 @@ auto_disable: false
 }
 
 func TestSchedulerRejectsWhenAllCandidatesExhausted(t *testing.T) {
-	_, rt := setupRuntime(t, `
+	setupRuntime(t, `
 default_limit_usd: 0.002
 price_source: "off"
 fallback_price: {prompt: 1000, completion: 1000, cache_read: 1000, cache_write: 1000}
@@ -282,8 +282,20 @@ auto_disable: false
 		t.Fatalf("pick = %+v, want a budget rejection", envelope.Result)
 	}
 
-	// "pass" hands the decision back to the host instead of refusing.
-	rt.cfg.OnAllExhausted = "pass"
+	// "pass" hands the decision back to the host instead of refusing. It needs its
+	// own runtime: the configuration of a live runtime is never mutated in place.
+	_, passRuntime := setupRuntime(t, `
+default_limit_usd: 0.002
+price_source: "off"
+on_all_exhausted: "pass"
+fallback_price: {prompt: 1000, completion: 1000, cache_read: 1000, cache_write: 1000}
+auto_disable: false
+`)
+	handleUsage(usagePayload("auth-a", "idx-a", "claude-sonnet-4-5", 5, 0))
+	handleUsage(usagePayload("auth-b", "idx-b", "claude-sonnet-4-5", 5, 0))
+	if _, ok := passRuntime.ledger.row("auth-a"); !ok {
+		t.Fatal("pass runtime missing ledger row")
+	}
 	raw = handlePick(request)
 	envelope.Result = schedulerPickResponse{}
 	if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
@@ -358,12 +370,89 @@ func TestUsageWithoutTokensIsIgnored(t *testing.T) {
 	}
 }
 
+func TestProviderLimitsSeedNewCredentialsOnly(t *testing.T) {
+	_, rt := setupRuntime(t, `
+price_source: "off"
+default_limit_usd: 1
+provider_limits:
+  claude: 5
+  mock: 0.25
+fallback_price: {prompt: 1000, completion: 1000, cache_read: 1000, cache_write: 1000}
+`)
+	// "openai-compatible-mock" contains "mock", so the provider entry wins over
+	// the global default.
+	handleUsage(usagePayload("auth-i", "idx-i", "claude-sonnet-4-5", 1, 0))
+	handleUsageWithProvider(t, "auth-j", "openai-compatible-mock", "gpt-4o-mini", 1, 0)
+	handleUsageWithProvider(t, "auth-k", "codex", "gpt-5.1", 1, 0)
+
+	claudeRow, _ := rt.ledger.row("auth-i")
+	if claudeRow.LimitMicroUSD != 5_000_000 || claudeRow.LimitSource != "provider_default" {
+		t.Fatalf("claude row = limit %d source %q, want 5 USD from provider_limits", claudeRow.LimitMicroUSD, claudeRow.LimitSource)
+	}
+	mockRow, _ := rt.ledger.row("auth-j")
+	if mockRow.LimitMicroUSD != 250_000 {
+		t.Fatalf("mock row limit = %d, want 250000 micro-USD", mockRow.LimitMicroUSD)
+	}
+	codexRow, _ := rt.ledger.row("auth-k")
+	if codexRow.LimitMicroUSD != 1_000_000 || codexRow.LimitSource != "default" {
+		t.Fatalf("codex row = limit %d source %q, want the global default", codexRow.LimitMicroUSD, codexRow.LimitSource)
+	}
+
+	// An operator-set budget survives a later settlement of the same credential.
+	if _, _, errLimit := rt.ledger.setLimit("auth-i", 42_000_000); errLimit != nil {
+		t.Fatalf("setLimit: %v", errLimit)
+	}
+	handleUsage(usagePayload("auth-i", "idx-i", "claude-sonnet-4-5", 1, 0))
+	claudeRow, _ = rt.ledger.row("auth-i")
+	if claudeRow.LimitMicroUSD != 42_000_000 || claudeRow.LimitSource != "manual" {
+		t.Fatalf("manual budget was overwritten: limit %d source %q", claudeRow.LimitMicroUSD, claudeRow.LimitSource)
+	}
+}
+
+func handleUsageWithProvider(t *testing.T, authID, provider, model string, input, output int64) {
+	t.Helper()
+	record := map[string]any{
+		"Model":    model,
+		"Provider": provider,
+		"AuthID":   authID,
+		"Generate": true,
+		"Detail":   map[string]any{"InputTokens": input, "OutputTokens": output},
+	}
+	raw, _ := json.Marshal(record)
+	handleUsage(raw)
+}
+
+func TestAliasNamesACredential(t *testing.T) {
+	_, rt := setupRuntime(t, `price_source: "off"`)
+	handleUsage(usagePayload("openai-compatibility:mock:68bc4482762f", "idx-x", "gpt-4o-mini", 1, 0))
+
+	response := aliasResponse([]byte(`{"key":"openai-compatibility:mock:68bc4482762f","alias":"5刀-A"}`))
+	if response.StatusCode != 200 {
+		t.Fatalf("alias status = %d body=%s", response.StatusCode, response.Body)
+	}
+	row, _ := rt.ledger.row("openai-compatibility:mock:68bc4482762f")
+	if row.Alias != "5刀-A" {
+		t.Fatalf("alias = %q", row.Alias)
+	}
+	if displayName(row) != "5刀-A" {
+		t.Fatalf("display = %q, want the alias", displayName(row))
+	}
+	// The id tail still distinguishes two sibling keys without any other name.
+	if got := idTail(Credential{Key: "openai-compatibility:mock:68bc4482762f", AuthIndex: "openai-compatibility:mock:82906d360369"}); got != "360369" {
+		t.Fatalf("tail = %q, want the auth index's last six characters", got)
+	}
+}
+
 func TestLedgerSurvivesReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 	led := newLedger(path)
 	led.load()
-	led.settle("auth-g", "idx-g", "claude", "g@example.com", 1234, false, time.Now().UTC(), 5_000_000)
+	led.settle(settleInput{
+		Key: "auth-g", AuthIndex: "idx-g", Provider: "claude", Label: "g@example.com",
+		BaseURL: "https://api.example.com/v1", Model: "claude-sonnet-4-5",
+		CostMicro: 1234, At: time.Now().UTC(), DefaultLimitMicro: 5_000_000,
+	})
 	led.persist()
 
 	reloaded := newLedger(path)
@@ -381,7 +470,7 @@ func TestLimitEditReportsPendingUnseal(t *testing.T) {
 	dir := t.TempDir()
 	led := newLedger(filepath.Join(dir, "state.json"))
 	led.load()
-	led.settle("auth-h", "", "claude", "", 600, false, time.Now().UTC(), 500)
+	led.settle(settleInput{Key: "auth-h", Provider: "claude", CostMicro: 600, At: time.Now().UTC(), DefaultLimitMicro: 500})
 	row, ok := led.row("auth-h")
 	if !ok || !row.Exhausted {
 		t.Fatalf("setup row = %+v", row)

@@ -43,15 +43,18 @@ func (p pricesYAML) toRates(fallback priceRates) (priceRates, error) {
 
 // Config is the plugin's own block under plugins.configs.<id>.
 type Config struct {
-	DefaultLimitUSD   float64               `yaml:"default_limit_usd"`
-	Enforce           *bool                 `yaml:"enforce"`
-	AutoDisable       *bool                 `yaml:"auto_disable"`
-	StateFile         string                `yaml:"state_file"`
-	PriceSource       string                `yaml:"price_source"`
-	PriceRefreshHours float64               `yaml:"price_refresh_hours"`
-	UnpricedPolicy    string                `yaml:"unpriced_policy"`
-	OnAllExhausted    string                `yaml:"on_all_exhausted"`
-	Debug             bool                  `yaml:"debug"`
+	DefaultLimitUSD   float64 `yaml:"default_limit_usd"`
+	Enforce           *bool   `yaml:"enforce"`
+	AutoDisable       *bool   `yaml:"auto_disable"`
+	StateFile         string  `yaml:"state_file"`
+	PriceSource       string  `yaml:"price_source"`
+	PriceRefreshHours float64 `yaml:"price_refresh_hours"`
+	UnpricedPolicy    string  `yaml:"unpriced_policy"`
+	OnAllExhausted    string  `yaml:"on_all_exhausted"`
+	Debug             bool    `yaml:"debug"`
+	// ProviderLimits gives a provider's newly seen credentials their budget.
+	// It never rewrites a credential that already has one.
+	ProviderLimits    map[string]float64    `yaml:"provider_limits"`
 	FallbackPrice     pricesYAML            `yaml:"fallback_price"`
 	PriceOverrides    map[string]pricesYAML `yaml:"price_overrides"`
 	ChannelMultiplier float64               `yaml:"channel_multiplier"`
@@ -95,6 +98,32 @@ func (c Config) rejectsWhenAllExhausted() bool {
 	return c.OnAllExhausted != "pass"
 }
 
+// defaultLimitFor is the budget a credential receives the first time it is
+// metered. A provider entry wins over the global default, and the most specific
+// (longest) matching entry wins over a shorter one, so "openai-compatibility-mock"
+// beats "mock".
+func (c Config) defaultLimitFor(provider string) (int64, string) {
+	name := strings.ToLower(strings.TrimSpace(provider))
+	if name != "" {
+		best := ""
+		for key := range c.ProviderLimits {
+			if !strings.Contains(name, key) {
+				continue
+			}
+			if len(key) > len(best) {
+				best = key
+			}
+		}
+		if best != "" {
+			return usdToMicro(c.ProviderLimits[best]), "provider_default"
+		}
+	}
+	if c.DefaultLimitUSD > 0 {
+		return usdToMicro(c.DefaultLimitUSD), "default"
+	}
+	return 0, ""
+}
+
 func parseConfig(raw []byte) (Config, error) {
 	cfg := defaultConfig()
 	if len(raw) == 0 {
@@ -134,6 +163,18 @@ func parseConfig(raw []byte) (Config, error) {
 	if cfg.DefaultLimitUSD < 0 || math.IsNaN(cfg.DefaultLimitUSD) || math.IsInf(cfg.DefaultLimitUSD, 0) {
 		return Config{}, fmt.Errorf("default_limit_usd must be a non-negative number")
 	}
+	providerLimits := make(map[string]float64, len(cfg.ProviderLimits))
+	for provider, limit := range cfg.ProviderLimits {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key == "" {
+			continue
+		}
+		if limit < 0 || math.IsNaN(limit) || math.IsInf(limit, 0) {
+			return Config{}, fmt.Errorf("provider_limits[%s] must be a non-negative number", provider)
+		}
+		providerLimits[key] = limit
+	}
+	cfg.ProviderLimits = providerLimits
 	if cfg.PriceRefreshHours <= 0 || math.IsNaN(cfg.PriceRefreshHours) {
 		cfg.PriceRefreshHours = 24
 	}
@@ -166,6 +207,7 @@ func parseConfig(raw []byte) (Config, error) {
 func (c Config) publicView() map[string]any {
 	return map[string]any{
 		"default_limit_usd":   c.DefaultLimitUSD,
+		"provider_limits":     c.ProviderLimits,
 		"enforce":             c.enforceEnabled(),
 		"auto_disable":        c.autoDisableEnabled(),
 		"price_source":        c.PriceSource,

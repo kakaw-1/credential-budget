@@ -21,6 +21,7 @@ const (
 	routeSync      = "/sync"
 	routePriceSync = "/price/sync"
 	routeRow       = "/row"
+	routeAlias     = "/alias"
 )
 
 type managementRequest struct {
@@ -53,7 +54,8 @@ func managementRegistration() managementRegistrationView {
 	return managementRegistrationView{
 		Routes: []managementRouteView{
 			{Method: http.MethodGet, Path: ManagementBase + routeState, Description: "凭证额度账本与价目表状态"},
-			{Method: http.MethodPost, Path: ManagementBase + routeLimits, Description: "设置某个凭证的一次性额度"},
+			{Method: http.MethodPost, Path: ManagementBase + routeLimits, Description: "设置单条凭证的一次性额度"},
+			{Method: http.MethodPost, Path: ManagementBase + routeAlias, Description: "给凭证起一个自己认得的备注名"},
 			{Method: http.MethodPost, Path: ManagementBase + routeUnseal, Description: "手动解封：清零已用并重新启用该凭证"},
 			{Method: http.MethodPost, Path: ManagementBase + routeUnsealAll, Description: "解封全部已停用凭证"},
 			{Method: http.MethodPost, Path: ManagementBase + routeSync, Description: "从 host.auth.list 同步凭证清单"},
@@ -75,6 +77,8 @@ func handleManagement(req managementRequest) managementResponse {
 		return stateResponse()
 	case req.Method == http.MethodPost && path == ManagementBase+routeLimits:
 		return limitResponse(req.Body)
+	case req.Method == http.MethodPost && path == ManagementBase+routeAlias:
+		return aliasResponse(req.Body)
 	case req.Method == http.MethodPost && path == ManagementBase+routeUnseal:
 		return unsealResponse(req.Body)
 	case req.Method == http.MethodPost && path == ManagementBase+routeUnsealAll:
@@ -126,6 +130,11 @@ func jsonError(status int, message string) managementResponse {
 type credentialView struct {
 	Key              string     `json:"key"`
 	Name             string     `json:"name,omitempty"`
+	Alias            string     `json:"alias,omitempty"`
+	Display          string     `json:"display"`
+	Tail             string     `json:"tail,omitempty"`
+	BaseURL          string     `json:"base_url,omitempty"`
+	LastModel        string     `json:"last_model,omitempty"`
 	Provider         string     `json:"provider,omitempty"`
 	Label            string     `json:"label,omitempty"`
 	LimitUSD         float64    `json:"limit_usd"`
@@ -145,10 +154,40 @@ type credentialView struct {
 	LastRequestAt    *time.Time `json:"last_request_at,omitempty"`
 }
 
+// displayName is what the operator reads first: their own alias, then the host
+// label (an email for OAuth accounts), then the credential file name, and only
+// then the runtime id, which for config-backed keys is an opaque hash.
+func displayName(row Credential) string {
+	for _, candidate := range []string{row.Alias, row.Label, row.Name} {
+		if strings.TrimSpace(candidate) != "" {
+			return strings.TrimSpace(candidate)
+		}
+	}
+	return row.Key
+}
+
+// idTail is the last six characters of the credential id: enough to tell two
+// sibling keys of the same provider apart when they have no other name.
+func idTail(row Credential) string {
+	identifier := strings.TrimSpace(row.AuthIndex)
+	if identifier == "" {
+		identifier = row.Key
+	}
+	if len(identifier) <= 6 {
+		return identifier
+	}
+	return identifier[len(identifier)-6:]
+}
+
 func toView(row Credential) credentialView {
 	view := credentialView{
 		Key:              row.Key,
 		Name:             row.Name,
+		Alias:            row.Alias,
+		Display:          displayName(row),
+		Tail:             idTail(row),
+		BaseURL:          row.BaseURL,
+		LastModel:        row.Model,
 		Provider:         row.Provider,
 		Label:            row.Label,
 		LimitUSD:         microToUSD(row.effectiveLimit()),
@@ -194,6 +233,15 @@ func stateResponse() managementResponse {
 	views := make([]credentialView, 0, len(rows))
 	var spent int64
 	limited, exhausted := 0, 0
+	type groupTotals struct {
+		provider  string
+		count     int
+		limited   int
+		exhausted int
+		spent     int64
+	}
+	groups := make(map[string]*groupTotals)
+	groupOrder := make([]string, 0)
 	for _, row := range rows {
 		views = append(views, toView(row))
 		spent += row.SpentMicroUSD
@@ -203,9 +251,40 @@ func stateResponse() managementResponse {
 		if row.Exhausted {
 			exhausted++
 		}
+		key := row.Provider
+		if key == "" {
+			key = "未标注供应商"
+		}
+		group, ok := groups[key]
+		if !ok {
+			group = &groupTotals{provider: key}
+			groups[key] = group
+			groupOrder = append(groupOrder, key)
+		}
+		group.count++
+		group.spent += row.SpentMicroUSD
+		if row.effectiveLimit() > 0 {
+			group.limited++
+		}
+		if row.Exhausted {
+			group.exhausted++
+		}
+	}
+	sortStrings(groupOrder)
+	groupViews := make([]map[string]any, 0, len(groupOrder))
+	for _, name := range groupOrder {
+		group := groups[name]
+		groupViews = append(groupViews, map[string]any{
+			"provider":  group.provider,
+			"count":     group.count,
+			"limited":   group.limited,
+			"exhausted": group.exhausted,
+			"spent_usd": microToUSD(group.spent),
+		})
 	}
 	return jsonResponse(http.StatusOK, map[string]any{
 		"credentials": views,
+		"groups":      groupViews,
 		"totals": map[string]any{
 			"credentials": len(views),
 			"limited":     limited,
@@ -244,6 +323,7 @@ func limitResponse(body []byte) managementResponse {
 	if *req.LimitUSD < 0 {
 		return jsonError(http.StatusBadRequest, "额度不能为负数")
 	}
+
 	row, needsUnseal, errLimit := rt.ledger.setLimit(key, usdToMicro(*req.LimitUSD))
 	if errLimit != nil {
 		return jsonError(http.StatusNotFound, errLimit.Error())
@@ -253,6 +333,32 @@ func limitResponse(body []byte) managementResponse {
 		"credential":      toView(row),
 		"requires_unseal": needsUnseal,
 	})
+}
+
+type aliasRequest struct {
+	Key   string `json:"key"`
+	Alias string `json:"alias"`
+}
+
+func aliasResponse(body []byte) managementResponse {
+	rt := runtime()
+	if rt == nil {
+		return jsonError(http.StatusServiceUnavailable, "插件尚未初始化")
+	}
+	var req aliasRequest
+	if errUnmarshal := json.Unmarshal(body, &req); errUnmarshal != nil {
+		return jsonError(http.StatusBadRequest, "请求格式无效："+errUnmarshal.Error())
+	}
+	key := strings.TrimSpace(req.Key)
+	if key == "" {
+		return jsonError(http.StatusBadRequest, "缺少 key")
+	}
+	row, errAlias := rt.ledger.setAlias(key, req.Alias)
+	if errAlias != nil {
+		return jsonError(http.StatusNotFound, errAlias.Error())
+	}
+	rt.ledger.persist()
+	return jsonResponse(http.StatusOK, map[string]any{"credential": toView(row)})
 }
 
 type unsealRequest struct {

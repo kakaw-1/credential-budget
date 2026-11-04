@@ -9,6 +9,7 @@
     --bg: #ffffff;
     --bg-soft: #fafafa;
     --bg-elevated: #ffffff;
+    --bg-group: #f4f6f8;
     --border: #e5e5e5;
     --border-strong: #d9d9d9;
     --text: #1f1f1f;
@@ -25,6 +26,7 @@
     --bg: #141414;
     --bg-soft: #1b1b1b;
     --bg-elevated: #1f1f1f;
+    --bg-group: #1a1a1a;
     --border: #303030;
     --border-strong: #424242;
     --text: #e6e6e6;
@@ -70,9 +72,14 @@
   th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
   th { font-weight: 500; color: var(--text-dim); font-size: 12px; white-space: nowrap; }
   tbody tr:last-child td { border-bottom: 0; }
-  tbody tr:hover { background: var(--bg-soft); }
+  tbody tr:hover:not(.group):not(.editor) { background: var(--bg-soft); }
+  tr.group > td { background: var(--bg-group); border-bottom: 1px solid var(--border); }
+  .group-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .group-name { font-weight: 600; }
+  .group-meta { color: var(--text-dim); font-size: 12px; }
   .name { font-weight: 500; word-break: break-all; }
   .name small { display: block; color: var(--text-dim); font-weight: 400; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--text-dim); }
   .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; min-width: 90px; }
   .bar > i { display: block; height: 100%; background: var(--primary); transition: width .25s; }
@@ -83,20 +90,25 @@
   .tag.limited { color: var(--primary); border-color: var(--primary); }
   .tag.exhausted { color: var(--danger); border-color: var(--danger); background: var(--danger-weak); }
   .tag.missing { color: var(--warn); border-color: var(--warn); }
-  .limit-editor { display: flex; align-items: center; gap: 6px; }
-  input[type="number"] {
-    font: inherit; width: 92px; padding: 4px 8px; border-radius: 6px;
+  tr.editor > td { background: var(--bg-soft); }
+  .editor-grid { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .editor-grid label { display: flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 12px; }
+  .editor-meta { color: var(--text-dim); font-size: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+  input[type="text"], input[type="number"] {
+    font: inherit; padding: 4px 8px; border-radius: 6px;
     border: 1px solid var(--border-strong); background: var(--bg-elevated); color: var(--text);
   }
-  input[type="number"]:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-weak); }
+  input[type="number"] { width: 92px; }
+  input[type="text"] { width: 170px; }
+  input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-weak); }
   .muted { color: var(--text-dim); }
   .err { color: var(--danger); font-size: 12px; }
   .notice { border: 1px solid var(--warn); color: var(--warn); border-radius: var(--radius); padding: 8px 12px; margin-top: 12px; background: transparent; }
   .notice.danger { border-color: var(--danger); color: var(--danger); }
   .empty { padding: 28px 14px; text-align: center; color: var(--text-dim); }
   .audit { max-height: 220px; overflow: auto; }
-  .audit li { list-style: none; padding: 5px 0; border-bottom: 1px dashed var(--border); font-size: 12px; display: flex; gap: 10px; }
   .audit ul { margin: 0; padding: 0 14px; }
+  .audit li { list-style: none; padding: 5px 0; border-bottom: 1px dashed var(--border); font-size: 12px; display: flex; gap: 10px; }
   .audit .t { color: var(--text-dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
   #toast {
     position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(10px);
@@ -106,8 +118,6 @@
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   #toast.error { border-color: var(--danger); color: var(--danger); }
-  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border-strong); border-top-color: var(--primary); border-radius: 50%; animation: r .7s linear infinite; vertical-align: -2px; }
-  @keyframes r { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -135,7 +145,7 @@
 
   <div class="card">
     <header>
-      <h2>凭证明细</h2>
+      <h2>凭证明细 · 按供应商分组</h2>
       <div class="actions">
         <button id="btn-unseal-all" class="small">全部解封</button>
       </div>
@@ -158,7 +168,7 @@
   var ID = "cpa-credential-budget";
   var BASE = "/v0/management/plugins/" + ID;
   var KEY_STORE = ID + ".key";
-  var state = { data: null, busy: false };
+  var state = { data: null, busy: false, open: {} };
 
   // --- theme: follow the host console when it is same-origin, else the OS ---
   function parentTheme() {
@@ -195,7 +205,8 @@
           return c.charCodeAt(0) ^ secret[i % secret.length];
         }));
       }
-      var key = raw && JSON.parse(raw) && JSON.parse(raw).state && JSON.parse(raw).state.managementKey;
+      var parsed = raw ? JSON.parse(raw) : null;
+      var key = parsed && parsed.state && parsed.state.managementKey;
       if (typeof key === "string" && key.trim()) return key.trim();
     } catch (e) {}
     try { return sessionStorage.getItem(KEY_STORE) || ""; } catch (e) { return ""; }
@@ -231,7 +242,7 @@
     node.textContent = message;
     node.className = "show" + (isError ? " error" : "");
     clearTimeout(toast.timer);
-    toast.timer = setTimeout(function () { node.className = ""; }, 3200);
+    toast.timer = setTimeout(function () { node.className = ""; }, 3600);
   }
 
   function usd(value) {
@@ -258,6 +269,64 @@
 
   var STATUS_TEXT = { unlimited: "未设额度", limited: "限额中", exhausted: "已停用" };
 
+  function identity(row) {
+    // The name cell: what the operator recognises first, then the facts that
+    // separate two sibling keys of the same provider.
+    var secondary = [];
+    if (row.label && row.label !== row.display) secondary.push(row.label);
+    if (row.base_url) secondary.push(row.base_url);
+    secondary.push("#" + (row.tail || row.key));
+    return esc(row.display) +
+      '<small class="mono">' + esc(secondary.join(" · ")) + "</small>";
+  }
+
+  function renderRow(row) {
+    var cls = row.exhausted ? "danger" : (row.usage_ratio > 0.8 ? "warn" : "");
+    var ratio = Math.max(0, Math.min(1, row.usage_ratio || 0));
+    var open = !!state.open[row.key];
+    var html = "<tr>";
+    html += '<td class="name">' + identity(row) +
+      (row.missing ? ' <span class="tag missing">凭证已消失</span>' : "") + "</td>";
+    html += '<td class="muted">' + esc(row.provider || "–") + "</td>";
+    html += '<td class="num">' + usd(row.spent_usd) +
+      (row.unpriced_requests ? '<small class="muted" style="display:block">' + row.unpriced_requests + " 次未定价</small>" : "") + "</td>";
+    html += '<td class="num">' + (row.limit_usd ? usd(row.limit_usd) : '<span class="muted">不限</span>') + "</td>";
+    html += '<td><div class="bar ' + cls + '"><i style="width:' + (ratio * 100).toFixed(1) + '%"></i></div></td>';
+    html += '<td><span class="tag ' + row.status + '">' + (STATUS_TEXT[row.status] || row.status) + "</span>" +
+      (row.disabled_by_plugin ? '<small class="muted" style="display:block">已置为 disabled</small>' : "") +
+      (row.disable_error ? '<small class="err" style="display:block" title="' + esc(row.disable_error) + '">禁用失败</small>' : "") + "</td>";
+    html += '<td class="muted num">' + (row.last_request_at ? timeText(row.last_request_at) : "–") +
+      (row.last_model ? '<small class="mono" style="display:block">' + esc(row.last_model) + "</small>" : "") + "</td>";
+    html += '<td><div class="actions">' +
+      '<button class="small" data-act="edit" data-key="' + esc(row.key) + '">' + (open ? "收起" : "设置") + "</button>" +
+      '<button class="small danger" data-act="unseal" data-key="' + esc(row.key) + '">解封</button>' +
+      "</div></td>";
+    html += "</tr>";
+
+    if (open) {
+      html += '<tr class="editor"><td colspan="8"><div class="editor-grid">' +
+        "<label>备注名 <input type=\"text\" data-field=\"alias\" data-key=\"" + esc(row.key) + "\" value=\"" + esc(row.alias || "") + "\" placeholder=\"比如 5刀-A\" maxlength=\"64\" /></label>" +
+        "<label>额度 $ <input type=\"number\" min=\"0\" step=\"0.5\" data-field=\"limit\" data-key=\"" + esc(row.key) + "\" value=\"" + (row.limit_usd || 0) + "\" /></label>" +
+        '<button class="small primary" data-act="save" data-key="' + esc(row.key) + '">保存</button>' +
+        '<span class="editor-meta">' +
+        "<span>凭证 ID <span class=\"mono\">" + esc(row.key) + "</span></span>" +
+        (row.name ? "<span>文件 <span class=\"mono\">" + esc(row.name) + "</span></span>" : "") +
+        (row.last_cost_usd ? "<span>上次计费 " + usd(row.last_cost_usd) + "</span>" : "") +
+        "</span></div></td></tr>";
+    }
+    return html;
+  }
+
+  function renderGroup(group, rows) {
+    var html = '<tr class="group"><td colspan="8"><div class="group-line">' +
+      '<span class="group-name">' + esc(group.provider) + "</span>" +
+      '<span class="group-meta">' + group.count + " 条 · 已设额度 " + group.limited + " · 已停用 " + group.exhausted +
+      " · 合计 " + usd(group.spent_usd) + "</span>" +
+      "</div></td></tr>";
+    rows.forEach(function (row) { html += renderRow(row); });
+    return html;
+  }
+
   function render() {
     var data = state.data;
     if (!data) return;
@@ -273,48 +342,36 @@
       : "价目表为空";
 
     var notices = [];
-    if (data.storage_error) notices.push(['<div class="notice danger">账本写入已暂停：' + esc(data.storage_error) + "</div>", 1]);
-    if (book.last_error) notices.push(['<div class="notice">价目表刷新失败（仍在用上次的缓存）：' + esc(book.last_error) + "</div>", 0]);
-    if (data.config && data.config.enforce === false) notices.push(['<div class="notice">已关闭 enforce：当前只记账，不会停止凭证。</div>', 0]);
-    if (data.config && data.config.auto_disable === false) notices.push(['<div class="notice">已关闭 auto_disable：只靠调度拦截，凭证在面板里仍显示为可用。</div>', 0]);
-    document.getElementById("notices").innerHTML = notices.map(function (n) { return n[0]; }).join("");
+    if (data.storage_error) notices.push('<div class="notice danger">账本写入已暂停：' + esc(data.storage_error) + "</div>");
+    if (book.last_error) notices.push('<div class="notice">价目表刷新失败（仍在用上次的缓存）：' + esc(book.last_error) + "</div>");
+    if (data.config && data.config.enforce === false) notices.push('<div class="notice">已关闭 enforce：当前只记账，不会停止凭证。</div>');
+    if (data.config && data.config.auto_disable === false) notices.push('<div class="notice">已关闭 auto_disable：只靠调度拦截，凭证在面板里仍显示为可用。</div>');
+    document.getElementById("notices").innerHTML = notices.join("");
 
     var rows = data.credentials || [];
     var host = document.getElementById("table-host");
     if (!rows.length) {
       host.innerHTML = '<div class="empty">还没有记录。凭证第一次被使用后会自动出现在这里。<br />如果刚部署插件，点右上角「同步凭证」先拉一次清单。</div>';
-    } else {
-      var html = '<table><thead><tr>' +
-        '<th style="min-width:200px">凭证</th><th>提供商</th><th>已用</th><th>额度</th>' +
-        '<th style="min-width:120px">进度</th><th>状态</th><th>最近使用</th><th style="min-width:230px">操作</th>' +
-        '</tr></thead><tbody>';
-      rows.forEach(function (row) {
-        var cls = row.exhausted ? "danger" : (row.usage_ratio > 0.8 ? "warn" : "");
-        var ratio = Math.max(0, Math.min(1, row.usage_ratio || 0));
-        html += "<tr>";
-        html += '<td class="name">' + esc(row.name || row.key) +
-          (row.label && row.label !== row.name ? "<small>" + esc(row.label) + "</small>" : "") +
-          (row.missing ? ' <span class="tag missing">凭证已消失</span>' : "") + "</td>";
-        html += '<td class="muted">' + esc(row.provider || "–") + "</td>";
-        html += '<td class="num">' + usd(row.spent_usd) +
-          (row.unpriced_requests ? '<small class="muted" style="display:block">' + row.unpriced_requests + " 次未定价</small>" : "") + "</td>";
-        html += '<td class="num">' + (row.limit_usd ? usd(row.limit_usd) : '<span class="muted">不限</span>') + "</td>";
-        html += '<td><div class="bar ' + cls + '"><i style="width:' + (ratio * 100).toFixed(1) + '%"></i></div></td>';
-        html += '<td><span class="tag ' + row.status + '">' + (STATUS_TEXT[row.status] || row.status) + "</span>" +
-          (row.disabled_by_plugin ? '<small class="muted" style="display:block">已置为 disabled</small>' : "") +
-          (row.disable_error ? '<small class="err" style="display:block" title="' + esc(row.disable_error) + '">禁用失败</small>' : "") + "</td>";
-        html += '<td class="muted num">' + (row.last_request_at ? timeText(row.last_request_at) : "–") +
-          (row.exhausted_at ? '<small style="display:block">停用于 ' + timeText(row.exhausted_at) + "</small>" : "") + "</td>";
-        html += '<td><div class="limit-editor">' +
-          '<input type="number" min="0" step="0.5" data-key="' + esc(row.key) + '" value="' + (row.limit_usd || 0) + '" />' +
-          '<button class="small" data-act="limit" data-key="' + esc(row.key) + '">保存额度</button>' +
-          '<button class="small danger" data-act="unseal" data-key="' + esc(row.key) + '">解封</button>' +
-          '</div></td>';
-        html += "</tr>";
-      });
-      html += "</tbody></table>";
-      host.innerHTML = html;
+      return;
     }
+    var byProvider = {};
+    rows.forEach(function (row) {
+      var name = row.provider || "未标注供应商";
+      (byProvider[name] = byProvider[name] || []).push(row);
+    });
+    var order = Object.keys(byProvider).sort();
+    var html = '<table><thead><tr>' +
+      '<th style="min-width:230px">凭证</th><th>供应商</th><th>已用</th><th>额度</th>' +
+      '<th style="min-width:110px">进度</th><th>状态</th><th>最近使用</th><th style="min-width:120px">操作</th>' +
+      "</tr></thead><tbody>";
+    order.forEach(function (name) {
+      var group = (data.groups || []).filter(function (g) { return g.provider === name; })[0] || {
+        provider: name, count: byProvider[name].length, limited: 0, exhausted: 0, spent_usd: 0
+      };
+      html += renderGroup(group, byProvider[name]);
+    });
+    html += "</tbody></table>";
+    host.innerHTML = html;
 
     var audit = data.audit || [];
     var list = document.getElementById("audit");
@@ -342,16 +399,20 @@
   function withBusy(promise) {
     if (state.busy) return Promise.resolve();
     state.busy = true;
-    var buttons = document.querySelectorAll("button");
-    buttons.forEach(function (button) { button.disabled = true; });
-    return promise.then(function () {
+    document.querySelectorAll("button").forEach(function (button) { button.disabled = true; });
+    var finish = function () {
       state.busy = false;
       document.querySelectorAll("button").forEach(function (button) { button.disabled = false; });
-    }, function (error) {
-      state.busy = false;
-      document.querySelectorAll("button").forEach(function (button) { button.disabled = false; });
+    };
+    return promise.then(finish, function (error) {
+      finish();
       toast(error.message || "操作失败", true);
     });
+  }
+
+  function fieldValue(selector) {
+    var node = document.querySelector(selector);
+    return node ? node.value : "";
   }
 
   document.getElementById("btn-refresh").addEventListener("click", function () { withBusy(load().catch(function () {})); });
@@ -382,23 +443,33 @@
   document.getElementById("table-host").addEventListener("click", function (event) {
     var button = event.target.closest("button[data-act]");
     if (!button) return;
-    var key = button.getAttribute("data-key");
     var act = button.getAttribute("data-act");
-    if (act === "limit") {
-      var input = document.querySelector('input[data-key="' + key.replace(/"/g, '\\"') + '"]');
-      var value = parseFloat(input && input.value);
-      if (!isFinite(value) || value < 0) { toast("额度必须是不小于 0 的数字", true); return; }
-      withBusy(request("/limits", { method: "POST", body: { key: key, limit_usd: value } }).then(function (result) {
+    var key = button.getAttribute("data-key") || "";
+
+    if (act === "edit") {
+      state.open[key] = !state.open[key];
+      render();
+      return;
+    }
+
+    if (act === "save") {
+      var alias = fieldValue('input[data-field="alias"][data-key="' + CSS.escape(key) + '"]');
+      var limit = parseFloat(fieldValue('input[data-field="limit"][data-key="' + CSS.escape(key) + '"]'));
+      if (!isFinite(limit) || limit < 0) { toast("额度必须是不小于 0 的数字", true); return; }
+      withBusy(request("/alias", { method: "POST", body: { key: key, alias: alias } }).then(function () {
+        return request("/limits", { method: "POST", body: { key: key, limit_usd: limit } });
+      }).then(function (result) {
         return load().then(function () {
           if (result && result.requires_unseal) {
-            toast("额度已提高，但凭证仍处于停用状态，点「解封」后才会重新参与调度。", true);
+            toast("已保存。额度高于已用，但凭证仍是停用状态，点「解封」后才会重新调度。", true);
           } else {
-            toast("额度已保存");
+            toast("已保存");
           }
         });
       }));
       return;
     }
+
     if (act === "unseal") {
       if (!confirm("解封该凭证？已用金额会清零，凭证重新参与调度。")) return;
       withBusy(request("/unseal", { method: "POST", body: { key: key } }).then(function (result) {

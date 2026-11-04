@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,6 +33,13 @@ type Credential struct {
 	Provider string `json:"provider,omitempty"`
 	// Label is the human label the host reports (email, note, ...).
 	Label string `json:"label,omitempty"`
+	// Alias is the operator's own name for this credential. It is the only
+	// identifier that survives a hashed runtime ID, so it wins in every display.
+	Alias string `json:"alias,omitempty"`
+	// BaseURL is the upstream base URL the host reports for this credential.
+	BaseURL string `json:"base_url,omitempty"`
+	// Model is the most recent model served by this credential.
+	Model string `json:"last_model,omitempty"`
 	// LimitMicroUSD is the one-time budget in micro-USD. Zero means unlimited.
 	LimitMicroUSD int64 `json:"limit_micro_usd"`
 	// LimitSource is manual when an operator set the budget, default when it was
@@ -262,43 +270,66 @@ func credentialKey(authID, authIndex string) string {
 	return authIndex
 }
 
+// settleInput is one settled request, reduced to what the ledger records.
+type settleInput struct {
+	Key                string
+	AuthIndex          string
+	Provider           string
+	Label              string
+	BaseURL            string
+	Model              string
+	CostMicro          int64
+	Unpriced           bool
+	At                 time.Time
+	DefaultLimitMicro  int64
+	DefaultLimitSource string
+}
+
 // settle records one settled request against a credential. It returns the row
 // as it now stands and whether the credential crossed its budget in this call.
-func (l *ledger) settle(key, authIndex, provider, label string, costMicro int64, unpriced bool, at time.Time, defaultLimitMicro int64) (Credential, bool) {
+func (l *ledger) settle(in settleInput) (Credential, bool) {
+	key := in.Key
 	l.mu.Lock()
 	row, ok := l.state.Credentials[key]
 	if !ok {
-		now := at
+		now := in.At
 		row = &Credential{
 			Key:           key,
-			AuthIndex:     authIndex,
-			Provider:      provider,
-			Label:         label,
-			LimitMicroUSD: defaultLimitMicro,
-			LimitSource:   limitSourceFor(defaultLimitMicro),
+			AuthIndex:     in.AuthIndex,
+			Provider:      in.Provider,
+			Label:         in.Label,
+			BaseURL:       in.BaseURL,
+			LimitMicroUSD: in.DefaultLimitMicro,
+			LimitSource:   in.DefaultLimitSource,
 			UpdatedAt:     &now,
 		}
 		l.state.Credentials[key] = row
 	}
 	if row.AuthIndex == "" {
-		row.AuthIndex = authIndex
+		row.AuthIndex = in.AuthIndex
 	}
-	if provider != "" {
-		row.Provider = provider
+	if in.Provider != "" {
+		row.Provider = in.Provider
 	}
-	if label != "" {
-		row.Label = label
+	if in.Label != "" {
+		row.Label = in.Label
+	}
+	if in.BaseURL != "" {
+		row.BaseURL = in.BaseURL
+	}
+	if in.Model != "" {
+		row.Model = in.Model
 	}
 	row.Missing = false
-	if costMicro > 0 {
-		row.SpentMicroUSD += costMicro
+	if in.CostMicro > 0 {
+		row.SpentMicroUSD += in.CostMicro
 	}
-	row.LastCostMicroUSD = costMicro
-	if unpriced {
+	row.LastCostMicroUSD = in.CostMicro
+	if in.Unpriced {
 		row.UnpricedRequests++
 	}
 	row.Requests++
-	stamp := at
+	stamp := in.At
 	row.LastRequestAt = &stamp
 	row.UpdatedAt = &stamp
 
@@ -319,11 +350,24 @@ func (l *ledger) settle(key, authIndex, provider, label string, costMicro int64,
 	return snapshot, trippedNow
 }
 
-func limitSourceFor(limitMicro int64) string {
-	if limitMicro > 0 {
-		return "default"
+// setAlias stores the operator's own name for a credential.
+func (l *ledger) setAlias(key, alias string) (Credential, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	row, ok := l.state.Credentials[key]
+	if !ok {
+		return Credential{}, fmt.Errorf("unknown credential %q", key)
 	}
-	return ""
+	alias = strings.TrimSpace(alias)
+	if len([]rune(alias)) > 64 {
+		alias = string([]rune(alias)[:64])
+	}
+	previous := row.Alias
+	row.Alias = alias
+	now := unixNow()
+	row.UpdatedAt = &now
+	l.auditLocked("alias_set", key, fmt.Sprintf("%q -> %q", previous, alias))
+	return *row, nil
 }
 
 // setLimit stores an operator-provided budget. Zero means unlimited.

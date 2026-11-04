@@ -184,6 +184,7 @@ func pluginRegistration() registration {
 				{Name: "unpriced_policy", Type: "enum", Default: "fallback", EnumValues: []string{"fallback", "skip"}, Description: "价目表查不到模型时的处理：fallback 按兜底价计费，skip 不计费但计数。"},
 				{Name: "on_all_exhausted", Type: "enum", Default: "reject", EnumValues: []string{"reject", "pass"}, Description: "该路由上所有凭证都爆额时：reject 直接返回额度不足，pass 交回网关继续调度。"},
 				{Name: "debug", Type: "boolean", Default: false, Description: "记录每次调度决策，排查用。"},
+				{Name: "provider_limits", Type: "object", Description: "按供应商给新出现的凭证指定默认额度，例如 {claude: 5}。只影响之后新记账的凭证。"},
 				{Name: "state_file", Type: "string", Default: "plugins/" + PluginID + "-state.json", Description: "账本与价目表缓存文件，相对路径按 CPA 工作目录解析。"},
 			},
 		},

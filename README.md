@@ -79,6 +79,7 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `default_limit_usd` | `0` | 新凭证第一次被记账时采用的额度（美元）。`0` 表示不限额，只在面板单独设。已存在的凭证不会被追溯修改。 |
+| `provider_limits` | 空 | 按供应商给**新出现**的凭证指定默认额度，优先于 `default_limit_usd`。键写供应商名或它的任意片段（`openai-compatible-mock`、`mock` 都能命中），最长匹配优先。同样不追溯已存在的凭证。 |
 | `enforce` | `true` | 关掉后只记账不熔断，用来先观察一段时间。 |
 | `auto_disable` | `true` | 关掉后不写 disabled，只靠调度否决。 |
 | `price_source` | `openrouter` | 单价来源。`openrouter` 用其公开价目表（无需 key，每 `price_refresh_hours` 刷一次）；`off` 只用 `price_overrides` + 兜底价。 |
@@ -92,6 +93,9 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 | `debug` | `false` | 记录每次调度决策。 |
 
 ```yaml
+      provider_limits:
+        claude: 5                      # claude 下新账号自动带 $5
+        openai-compatible-mock: 3      # 这个上游的每条新 key 自动带 $3
       price_overrides:
         claude-sonnet-4-5:
           prompt: 3
@@ -120,11 +124,18 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 
 ## 面板
 
-`插件 → 凭证额度`。表格里每个凭证一行：已用 / 额度 / 进度 / 状态 / 最近使用，行内可改额度、可解封；顶部是汇总与价目表状态；底部是操作记录（改额度、熔断、禁用、解封都有留痕）。
+`插件 → 凭证额度`。
+
+**按供应商分组**：每个供应商一行组头，只显示统计（`N 条 · 已设额度 M · 已停用 K · 合计 $X`），下面才是这个供应商的凭证。分组只是看，改额度仍然是一条一条改。
+
+**怎么认出是那张 key**：每行主标题按优先级取 `备注名 > 主机上报的名字/邮箱 > auth 文件名 > 运行时 ID`，第二行小字给 `上游 base-url · #ID后6位`，最近使用时间下面标出这次用的模型。OAuth 账号通常直接显示邮箱；配置型 key（`api-keys`）只有 `openai-compatibility:mock:68bc4482762f` 这种哈希，认不出就点「设置」给它起个备注名，比如「5刀-A」。
+
+**设置** 展开后可以同时改备注名和额度，一次保存；**解封** 清零已用并放开该凭证。
 
 - **解封 = 清零已用 + 解除插件设的 disabled**，等于重发一张新额度。
 - **提额不会自动解封**：额度改高了但凭证仍停用，面板会提示你再点一次「解封」。这是刻意的——解封只有人能触发。
 - 插件只解除**自己**设的 disabled；如果这个凭证是你手动关掉的，解封不会替你打开。
+- **整组批量设额度没有实现，也不打算做**：额度必须一条 key 一个数，否则同组 key 会共享池子。想让新 key 自动带额度，用 `provider_limits`（只影响之后新出现的凭证）。
 
 ---
 

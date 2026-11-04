@@ -117,9 +117,21 @@ func handleUsage(request []byte) []byte {
 
 	model := firstNonEmpty(record.Model, record.ResponseModel, record.Alias)
 	rates, _, priced := rt.ledger.priceBook().lookup(model, rt.cfg.OverrideRates)
+	limitMicro, limitSource := rt.cfg.defaultLimitFor(record.Provider)
+	settle := settleInput{
+		Key:                key,
+		AuthIndex:          record.AuthIndex,
+		Provider:           record.Provider,
+		BaseURL:            record.BaseURL,
+		Model:              model,
+		Unpriced:           !priced,
+		At:                 settleTime(record),
+		DefaultLimitMicro:  limitMicro,
+		DefaultLimitSource: limitSource,
+	}
 	if !priced {
 		if rt.cfg.UnpricedPolicy == "skip" {
-			rt.ledger.settle(key, record.AuthIndex, record.Provider, "", 0, true, settleTime(record), rt.defaultLimitMicro())
+			rt.ledger.settle(settle)
 			return okEnvelope(map[string]any{})
 		}
 		rates = rt.cfg.FallbackRates
@@ -129,7 +141,8 @@ func handleUsage(request []byte) []byte {
 		appendLog("usage.handle: " + errQuote.Error())
 		return okEnvelope(map[string]any{})
 	}
-	rt.ledger.settle(key, record.AuthIndex, record.Provider, "", cost, !priced, settleTime(record), rt.defaultLimitMicro())
+	settle.CostMicro = cost
+	rt.ledger.settle(settle)
 	return okEnvelope(map[string]any{})
 }
 
@@ -139,8 +152,4 @@ func settleTime(record usageRecord) time.Time {
 		return record.RequestedAt.UTC()
 	}
 	return unixNow()
-}
-
-func (rt *runtimeState) defaultLimitMicro() int64 {
-	return usdToMicro(rt.cfg.DefaultLimitUSD)
 }
