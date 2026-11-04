@@ -123,6 +123,14 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
         "gpt-5.1":
           prompt: 1.25
           completion: 10
+        # 分段价：输入超过 200k 之后换档，未写的字段继承上面的基础价
+        gemini-2.5-pro:
+          prompt: 1.25
+          completion: 10
+          tiers:
+            - min_prompt_tokens: 200000
+              prompt: 2.5
+              completion: 15
 ```
 
 ---
@@ -137,6 +145,19 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 - 未定价模型**默认按兜底价计费**，面板会显示「N 次未定价」，方便你补 `price_overrides`
 
 单价参考 Oh My CPA 的做法，取 OpenRouter 公开模型列表（`prompt` / `completion` / `input_cache_read` / `input_cache_write`）。
+
+### 分段计费（长上下文换档）
+
+和 OMC 一样支持按上下文长度分档：同一个模型，输入超过某个 token 数之后换一套价。
+
+- 阈值判定看**本次输入的完整 token 数（含缓存）**，`>= min_prompt_tokens` 才算进入该档；
+- 一个请求**只取一档**，绝不叠加；多档同时命中时取阈值更大的那个；
+- 档位只覆盖它写了的字段，没写的（比如只给了 `prompt`）继承基础价；
+- 可选时间窗 `utc_start` / `utc_end`（HHMM，UTC，半开区间，可跨午夜），用于按时段变价的模型；
+- 数据来源两种：OpenRouter 价目表里自带的 `pricing.overrides`（自动），以及 `price_overrides.<model>.tiers`（手写，优先）；
+- 面板「价目表」会显示多少个模型带分段价，凭证行会用「按 ≥200k tokens 计价」标出最近一次落在哪一档。
+
+实测（v0.1.2）：基础 $1/1M、≥200k 换 $2/1M 的模型，发三个请求 —— 1000 token 记 1000 µUSD、199999 token 记 199999 µUSD（不足阈值走基础价）、250000 token 记 500000 µUSD（进入高档），合计 $0.700999，与手算完全一致。
 
 ---
 

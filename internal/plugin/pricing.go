@@ -28,11 +28,154 @@ type priceRates struct {
 	CacheWritePer1M float64 `json:"cache_write_price_per_1m"`
 }
 
+// priceTier is a conditional rate override. A tier applies only when every
+// condition it carries holds, and the tiers of one model never stack: the most
+// specific match governs the whole request.
+//
+// Rates a tier leaves nil inherit the model's base rate, so a tier can move the
+// prompt price alone without restating the rest of the card.
+type priceTier struct {
+	// MinPromptTokens is the smallest full input (cached tokens included) the
+	// tier applies to. Zero means the tier is not gated on size.
+	MinPromptTokens int64 `json:"min_prompt_tokens,omitempty"`
+	// UTCStart and UTCEnd bound a billing window as HHMM in UTC, half-open and
+	// wrapping past midnight when end <= start.
+	UTCStart *int `json:"utc_start,omitempty"`
+	UTCEnd   *int `json:"utc_end,omitempty"`
+
+	PromptPer1M     *float64 `json:"prompt_price_per_1m,omitempty"`
+	CompletionPer1M *float64 `json:"completion_price_per_1m,omitempty"`
+	CacheReadPer1M  *float64 `json:"cache_read_price_per_1m,omitempty"`
+	CacheWritePer1M *float64 `json:"cache_write_price_per_1m,omitempty"`
+}
+
+func (t priceTier) hasWindow() bool {
+	return t.UTCStart != nil && t.UTCEnd != nil
+}
+
+func (t priceTier) hasCondition() bool {
+	return t.MinPromptTokens > 0 || t.hasWindow()
+}
+
+// modelPrice is one model's base card plus its conditional overrides.
+type modelPrice struct {
+	Base  priceRates  `json:"base"`
+	Tiers []priceTier `json:"tiers,omitempty"`
+}
+
+// UnmarshalJSON keeps state files written before tiers existed readable: those
+// store the four rates directly on the model entry.
+func (p *modelPrice) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Base  *priceRates `json:"base"`
+		Tiers []priceTier `json:"tiers"`
+	}
+	if errUnmarshal := json.Unmarshal(data, &probe); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	if probe.Base != nil {
+		p.Base = *probe.Base
+		p.Tiers = probe.Tiers
+		return nil
+	}
+	var legacy priceRates
+	if errUnmarshal := json.Unmarshal(data, &legacy); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	p.Base = legacy
+	p.Tiers = nil
+	return nil
+}
+
+// rateCard resolves the rates that govern one request: the matching tier's
+// overrides laid over the base card.
+func (p modelPrice) rateCard(inputTokens int64, at time.Time) (priceRates, *priceTier) {
+	rates := p.Base
+	tier := selectTier(p.Tiers, inputTokens, at)
+	if tier == nil {
+		return rates, nil
+	}
+	if tier.PromptPer1M != nil {
+		rates.PromptPer1M = *tier.PromptPer1M
+	}
+	if tier.CompletionPer1M != nil {
+		rates.CompletionPer1M = *tier.CompletionPer1M
+	}
+	if tier.CacheReadPer1M != nil {
+		rates.CacheReadPer1M = *tier.CacheReadPer1M
+	}
+	if tier.CacheWritePer1M != nil {
+		rates.CacheWritePer1M = *tier.CacheWritePer1M
+	}
+	return rates, tier
+}
+
+// selectTier returns the single tier that governs a request, or nil when the
+// base card applies.
+//
+// A tier matches when the full input reaches its threshold and, if it carries a
+// window, the request timestamp falls inside it. Tiers never stack: the one with
+// the larger threshold wins, and a window-only tier loses to any sized tier.
+func selectTier(tiers []priceTier, inputTokens int64, at time.Time) *priceTier {
+	var best *priceTier
+	for index := range tiers {
+		tier := &tiers[index]
+		if !tier.hasCondition() {
+			continue
+		}
+		if tier.MinPromptTokens > 0 && clampTokens(inputTokens) < tier.MinPromptTokens {
+			continue
+		}
+		if tier.hasWindow() && !windowHolds(*tier, at) {
+			continue
+		}
+		if best == nil || tierOutranks(*tier, *best) {
+			best = tier
+		}
+	}
+	return best
+}
+
+func tierOutranks(candidate, current priceTier) bool {
+	if candidate.MinPromptTokens != current.MinPromptTokens {
+		return candidate.MinPromptTokens > current.MinPromptTokens
+	}
+	return candidate.hasWindow() && !current.hasWindow()
+}
+
+// windowHolds reads the billing window on the UTC clock, half-open, wrapping
+// past midnight when end <= start.
+func windowHolds(tier priceTier, at time.Time) bool {
+	if !tier.hasWindow() {
+		return true
+	}
+	utc := at.UTC()
+	minutes := utc.Hour()*60 + utc.Minute()
+	start := clockMinutes(*tier.UTCStart)
+	end := clockMinutes(*tier.UTCEnd)
+	if start == end {
+		return true
+	}
+	if start < end {
+		return minutes >= start && minutes < end
+	}
+	return minutes >= start || minutes < end
+}
+
+// clockMinutes turns an HHMM integer into minutes since midnight, tolerating a
+// value stored as minutes already.
+func clockMinutes(value int) int {
+	if value <= 2400 {
+		return (value/100)*60 + value%100
+	}
+	return value
+}
+
 // priceBookState is the cached price book persisted with the ledger.
 type priceBookState struct {
 	Source    string                `json:"source"`
 	FetchedAt *time.Time            `json:"fetched_at,omitempty"`
-	Models    map[string]priceRates `json:"models,omitempty"`
+	Models    map[string]modelPrice `json:"models,omitempty"`
 	// LastError keeps the last refresh failure so the panel can show stale data
 	// instead of silently pretending the book is current.
 	LastError string `json:"last_error,omitempty"`
@@ -45,11 +188,30 @@ func (b *priceBookState) count() int {
 	return len(b.Models)
 }
 
+// tieredModels counts models whose price depends on context size or time.
+func (b *priceBookState) tieredModels() int {
+	if b == nil {
+		return 0
+	}
+	count := 0
+	for _, price := range b.Models {
+		if len(price.Tiers) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func (b *priceBookState) summary() map[string]any {
 	if b == nil {
-		return map[string]any{"source": "", "models": 0, "stale": true}
+		return map[string]any{"source": "", "models": 0, "tiered": 0, "stale": true}
 	}
-	view := map[string]any{"source": b.Source, "models": len(b.Models), "last_error": b.LastError}
+	view := map[string]any{
+		"source":     b.Source,
+		"models":     len(b.Models),
+		"tiered":     b.tieredModels(),
+		"last_error": b.LastError,
+	}
 	if b.FetchedAt != nil {
 		view["fetched_at"] = b.FetchedAt
 		view["age_hours"] = math.Round(time.Since(*b.FetchedAt).Hours()*10) / 10
@@ -158,23 +320,23 @@ var (
 // lookup resolves a CPA model name against the price book. The candidates go
 // from most to least precise: exact id, dash/dot swap, bare name without the
 // vendor, then the date/version-stripped forms.
-func (b *priceBookState) lookup(model string, overrides map[string]priceRates) (priceRates, string, bool) {
+func (b *priceBookState) lookup(model string, overrides map[string]modelPrice) (modelPrice, string, bool) {
 	name := strings.ToLower(strings.TrimSpace(model))
 	if name == "" {
-		return priceRates{}, "", false
+		return modelPrice{}, "", false
 	}
-	if rates, ok := overrides[name]; ok {
-		return rates, "override", true
+	if price, ok := overrides[name]; ok {
+		return price, "override", true
 	}
 	if b == nil || len(b.Models) == 0 {
-		return priceRates{}, "", false
+		return modelPrice{}, "", false
 	}
 	for _, candidate := range modelCandidates(name) {
-		if rates, ok := b.Models[candidate]; ok {
-			return rates, "openrouter", true
+		if price, ok := b.Models[candidate]; ok {
+			return price, "openrouter", true
 		}
 	}
-	return priceRates{}, "", false
+	return modelPrice{}, "", false
 }
 
 func modelCandidates(name string) []string {
@@ -206,7 +368,11 @@ func modelCandidates(name string) []string {
 // decodeOpenRouter reads the public model list into rate cards. OpenRouter
 // quotes USD per token as strings; missing cache rates fall back to the prompt
 // rate, which is what the vendor charges when it does not publish one.
-func decodeOpenRouter(body []byte) (map[string]priceRates, error) {
+//
+// The optional `pricing.overrides` array carries the vendor's own conditional
+// prices, which is where long-context steps such as "the first 200k tokens cost
+// one rate, beyond that another" come from.
+func decodeOpenRouter(body []byte) (map[string]modelPrice, error) {
 	var envelope struct {
 		Data []struct {
 			ID      string                     `json:"id"`
@@ -218,7 +384,7 @@ func decodeOpenRouter(body []byte) (map[string]priceRates, error) {
 	if errDecode := decoder.Decode(&envelope); errDecode != nil {
 		return nil, fmt.Errorf("decode OpenRouter price list: %w", errDecode)
 	}
-	models := make(map[string]priceRates, len(envelope.Data))
+	models := make(map[string]modelPrice, len(envelope.Data))
 	for _, entry := range envelope.Data {
 		id := strings.ToLower(strings.TrimSpace(entry.ID))
 		if id == "" || strings.Contains(id, ":") || len(id) > 256 {
@@ -237,14 +403,85 @@ func decodeOpenRouter(body []byte) (map[string]priceRates, error) {
 		if !okCacheWrite {
 			cacheWrite = prompt
 		}
-		models[id] = priceRates{
-			PromptPer1M:     prompt,
-			CompletionPer1M: completion,
-			CacheReadPer1M:  cacheRead,
-			CacheWritePer1M: cacheWrite,
+		models[id] = modelPrice{
+			Base: priceRates{
+				PromptPer1M:     prompt,
+				CompletionPer1M: completion,
+				CacheReadPer1M:  cacheRead,
+				CacheWritePer1M: cacheWrite,
+			},
+			Tiers: decodeOpenRouterTiers(entry.Pricing["overrides"], okCacheRead, okCacheWrite),
 		}
 	}
 	return models, nil
+}
+
+// decodeOpenRouterTiers reads one model's conditional prices. Entries without a
+// size threshold or a window carry no condition and are dropped.
+func decodeOpenRouterTiers(raw json.RawMessage, hasCacheRead, hasCacheWrite bool) []priceTier {
+	if len(raw) == 0 {
+		return nil
+	}
+	var entries []map[string]json.RawMessage
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if errDecode := decoder.Decode(&entries); errDecode != nil {
+		return nil
+	}
+	tiers := make([]priceTier, 0, len(entries))
+	for _, entry := range entries {
+		var tier priceTier
+		if value, ok := integerField(entry["min_prompt_tokens"]); ok && value > 0 {
+			tier.MinPromptTokens = value
+		}
+		start, hasStart := integerField(entry["utc_start"])
+		end, hasEnd := integerField(entry["utc_end"])
+		if hasStart && hasEnd {
+			startClock, endClock := int(start), int(end)
+			tier.UTCStart, tier.UTCEnd = &startClock, &endClock
+		}
+		tier.PromptPer1M = optionalPerMillion(entry["prompt"])
+		tier.CompletionPer1M = optionalPerMillion(entry["completion"])
+		tier.CacheReadPer1M = optionalPerMillion(entry["input_cache_read"])
+		tier.CacheWritePer1M = optionalPerMillion(entry["input_cache_write"])
+		if tier.PromptPer1M != nil && !hasCacheRead && tier.CacheReadPer1M == nil {
+			value := *tier.PromptPer1M
+			tier.CacheReadPer1M = &value
+		}
+		if tier.PromptPer1M != nil && !hasCacheWrite && tier.CacheWritePer1M == nil {
+			value := *tier.PromptPer1M
+			tier.CacheWritePer1M = &value
+		}
+		if !tier.hasCondition() {
+			continue
+		}
+		tiers = append(tiers, tier)
+	}
+	if len(tiers) == 0 {
+		return nil
+	}
+	return tiers
+}
+
+func integerField(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	text := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	value, errParse := strconv.ParseInt(text, 10, 64)
+	if errParse != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+// optionalPerMillion is perMillion with "absent" kept distinct from "zero".
+func optionalPerMillion(raw json.RawMessage) *float64 {
+	value, ok := perMillion(raw)
+	if !ok {
+		return nil
+	}
+	return &value
 }
 
 // perMillion converts a USD-per-token string into USD per 1M tokens.
@@ -270,13 +507,32 @@ type priceBookRefresher struct {
 	once  sync.Once
 }
 
+// The upstream price list is public but not free to hammer: the host reloads the
+// plugin several times at startup, so refreshes are rate limited.
+var (
+	priceRefreshMu       sync.Mutex
+	lastPriceRefresh     time.Time
+	priceRefreshCooldown = 5 * time.Minute
+)
+
 // refreshPriceBook fetches the public price list and stores it. Failures keep
 // the previous book and only record the error, so a transient outage never
 // changes how requests are billed.
-func refreshPriceBook(led *ledger, cfg Config, client *http.Client) error {
+//
+// The host calls plugin.register/reconfigure several times while it starts, and
+// each call installs a refresher; the cooldown keeps that from turning into a
+// burst of upstream fetches. A manual refresh passes force=true.
+func refreshPriceBook(led *ledger, cfg Config, client *http.Client, force ...bool) error {
 	if cfg.PriceSource != "openrouter" {
 		return nil
 	}
+	forceRefresh := len(force) > 0 && force[0]
+	priceRefreshMu.Lock()
+	if !forceRefresh && !lastPriceRefresh.IsZero() && time.Since(lastPriceRefresh) < priceRefreshCooldown {
+		priceRefreshMu.Unlock()
+		return nil
+	}
+	priceRefreshMu.Unlock()
 	ctxClient := client
 	if ctxClient == nil {
 		ctxClient = &http.Client{Timeout: 20 * time.Second}
@@ -314,9 +570,13 @@ func refreshPriceBook(led *ledger, cfg Config, client *http.Client) error {
 		return errEmpty
 	}
 	now := unixNow()
-	led.storePriceBook(&priceBookState{Source: "openrouter", FetchedAt: &now, Models: models})
+	book := &priceBookState{Source: "openrouter", FetchedAt: &now, Models: models}
+	led.storePriceBook(book)
 	led.persist()
-	appendLog(fmt.Sprintf("price book refreshed: %d models", len(models)))
+	priceRefreshMu.Lock()
+	lastPriceRefresh = time.Now()
+	priceRefreshMu.Unlock()
+	appendLog(fmt.Sprintf("price book refreshed: %d models, %d with stepped prices", len(models), book.tieredModels()))
 	return nil
 }
 

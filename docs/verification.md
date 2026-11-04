@@ -112,6 +112,23 @@ pluginhost: plugin loaded version=0.1.1        → 热加载，restart_required=
 
 v0.1.0 与 v0.1.1 都从商店装过一遍，CI 的 tag↔版本一致性门禁把版本和 release 资产名绑在一起。
 
+## 第四轮：分段（长上下文）计费
+
+价目 override：`big-model` / `edge-model` 基础 $1/1M，`min_prompt_tokens: 200000` 之后 $2/1M。mock 按模型返回不同 token 数，三个请求：
+
+```
+small   prompt_tokens=1000    → 1000 µUSD      （基础价）
+edge    prompt_tokens=199999  → 199999 µUSD    （差 1 个 token，仍走基础价）
+big     prompt_tokens=250000  → 500000 µUSD    （进入 ≥200k 档）
+合计 spent_usd = 0.700999，last_tier = "≥200k tokens"
+```
+
+手算 `(1000 + 199999 + 250000×2) µUSD = 700999 µUSD = $0.700999`，与面板一致。
+
+OpenRouter 真实价目表：一次刷新拿到 **361 个模型，其中 58 个带分段价**，说明 `pricing.overrides` 的解析在真实数据上生效。
+
+顺带修掉一个自扰问题：宿主启动时会多次调用 `plugin.register` / `reconfigure`，每次都装一个新的刷新协程，原先会连着打好几次 OpenRouter；加了 5 分钟冷却（手动「刷新价目」按钮用 force 绕过），同一次启动只发一次请求。
+
 ## 单元测试
 
 ```
@@ -126,6 +143,12 @@ $ go test -race ./...
 === RUN   TestUsageWithoutTokensIsIgnored                --- PASS
 === RUN   TestProviderLimitsSeedNewCredentialsOnly       --- PASS
 === RUN   TestAliasNamesACredential                      --- PASS
+=== RUN   TestSchedulerRegistersEveryCandidateOfAProvider --- PASS
+=== RUN   TestDecodeOpenRouterKeepsSteppedPrices          --- PASS
+=== RUN   TestSelectTierUsesFullInputAndDoesNotStack     --- PASS
+=== RUN   TestTierWindowWrapsPastMidnight                --- PASS
+=== RUN   TestQuoteChargesTheMatchedTier                 --- PASS
+=== RUN   TestConfigOverrideAcceptsTiers                 --- PASS
 === RUN   TestLedgerSurvivesReload                       --- PASS
 === RUN   TestLimitEditReportsPendingUnseal              --- PASS
 PASS

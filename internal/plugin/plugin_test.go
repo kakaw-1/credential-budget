@@ -501,6 +501,149 @@ fallback_price: {prompt: 1, completion: 1, cache_read: 1, cache_write: 1}
 	}
 }
 
+func TestDecodeOpenRouterKeepsSteppedPrices(t *testing.T) {
+	body := []byte(`{"data":[
+	  {"id":"vendor/long-context-model",
+	   "pricing":{
+	     "prompt":"0.00000125","completion":"0.00001",
+	     "input_cache_read":"0.000000125","input_cache_write":"0.0000015",
+	     "overrides":[
+	       {"min_prompt_tokens":200000,"prompt":"0.0000025","completion":"0.000015"},
+	       {"min_prompt_tokens":1000000,"completion":"0.00002"}
+	     ]}}
+	]}`)
+	models, errDecode := decodeOpenRouter(body)
+	if errDecode != nil {
+		t.Fatalf("decode: %v", errDecode)
+	}
+	price := models["vendor/long-context-model"]
+	if price.Base.PromptPer1M != 1.25 || price.Base.CompletionPer1M != 10 {
+		t.Fatalf("base = %+v, want 1.25/10 per 1M", price.Base)
+	}
+	if len(price.Tiers) != 2 {
+		t.Fatalf("tiers = %d, want 2", len(price.Tiers))
+	}
+	first := price.Tiers[0]
+	if first.MinPromptTokens != 200000 || first.PromptPer1M == nil || *first.PromptPer1M != 2.5 {
+		t.Fatalf("first tier = %+v", first)
+	}
+	// A tier that only restates the completion price leaves prompt inheriting base.
+	second := price.Tiers[1]
+	if second.PromptPer1M != nil {
+		t.Fatalf("second tier must not invent a prompt price: %+v", second)
+	}
+}
+
+func TestSelectTierUsesFullInputAndDoesNotStack(t *testing.T) {
+	tiers := []priceTier{
+		{MinPromptTokens: 200_000},
+		{MinPromptTokens: 1_000_000},
+	}
+	at := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+
+	if tier := selectTier(tiers, 199_999, at); tier != nil {
+		t.Fatalf("199999 tokens matched a tier: %+v", tier)
+	}
+	if tier := selectTier(tiers, 200_000, at); tier == nil || tier.MinPromptTokens != 200_000 {
+		t.Fatalf("200000 tokens = %+v, want the 200k tier", tier)
+	}
+	// Both thresholds are met; only the larger one governs the request.
+	if tier := selectTier(tiers, 1_500_000, at); tier == nil || tier.MinPromptTokens != 1_000_000 {
+		t.Fatalf("1500000 tokens = %+v, want the 1M tier alone", tier)
+	}
+}
+
+func TestTierWindowWrapsPastMidnight(t *testing.T) {
+	start, end := 2300, 100
+	tiers := []priceTier{{UTCStart: &start, UTCEnd: &end}}
+	inside := []time.Time{
+		time.Date(2026, 11, 4, 23, 30, 0, 0, time.UTC),
+		time.Date(2026, 11, 4, 0, 30, 0, 0, time.UTC),
+		time.Date(2026, 11, 4, 23, 0, 0, 0, time.UTC),
+	}
+	for _, at := range inside {
+		if tier := selectTier(tiers, 10, at); tier == nil {
+			t.Fatalf("%s should fall inside 2300-0100 UTC", at.Format(time.RFC3339))
+		}
+	}
+	outside := []time.Time{
+		time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 11, 4, 1, 0, 0, 0, time.UTC),
+	}
+	for _, at := range outside {
+		if tier := selectTier(tiers, 10, at); tier != nil {
+			t.Fatalf("%s should fall outside 2300-0100 UTC", at.Format(time.RFC3339))
+		}
+	}
+}
+
+func TestQuoteChargesTheMatchedTier(t *testing.T) {
+	promptHigh := 2.0
+	price := modelPrice{
+		Base:  priceRates{PromptPer1M: 1, CompletionPer1M: 4},
+		Tiers: []priceTier{{MinPromptTokens: 200_000, PromptPer1M: &promptHigh}},
+	}
+	at := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+
+	shortRates, shortTier := price.rateCard(199_999, at)
+	if shortTier != nil {
+		t.Fatal("a short request must use the base card")
+	}
+	shortCost, _ := quoteMicro(shortRates, tokens{Input: 199_999}, 1)
+	if shortCost != 199_999 {
+		t.Fatalf("short cost = %d micro-USD, want 199999 (base rate)", shortCost)
+	}
+
+	longRates, longTier := price.rateCard(200_000, at)
+	if longTier == nil {
+		t.Fatal("a 200k request must hit the tier")
+	}
+	longCost, _ := quoteMicro(longRates, tokens{Input: 200_000}, 1)
+	if longCost != 400_000 {
+		t.Fatalf("long cost = %d micro-USD, want 400000 (tier rate)", longCost)
+	}
+	// The tier only moved the prompt rate; completion keeps the base rate.
+	completionRates, _ := price.rateCard(200_000, at)
+	if completionRates.CompletionPer1M != 4 {
+		t.Fatalf("completion rate = %v, want the base 4", completionRates.CompletionPer1M)
+	}
+}
+
+func TestConfigOverrideAcceptsTiers(t *testing.T) {
+	cfg, errConfig := parseConfig([]byte(`
+price_source: "off"
+price_overrides:
+  gemini-2.5-pro:
+    prompt: 1.25
+    completion: 10
+    tiers:
+      - min_prompt_tokens: 200000
+        prompt: 2.5
+        completion: 15
+`))
+	if errConfig != nil {
+		t.Fatalf("parse: %v", errConfig)
+	}
+	price := cfg.OverrideRates["gemini-2.5-pro"]
+	if price.Base.PromptPer1M != 1.25 || len(price.Tiers) != 1 {
+		t.Fatalf("override = %+v", price)
+	}
+	if price.Tiers[0].CompletionPer1M == nil || *price.Tiers[0].CompletionPer1M != 15 {
+		t.Fatalf("tier completion = %+v", price.Tiers[0])
+	}
+
+	if _, errBad := parseConfig([]byte(`
+price_source: "off"
+price_overrides:
+  broken:
+    prompt: 1
+    tiers:
+      - prompt: 2
+`)); errBad == nil {
+		t.Fatal("a tier without a threshold or window must be rejected")
+	}
+}
+
 func TestLedgerSurvivesReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")

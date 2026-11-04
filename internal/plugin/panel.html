@@ -289,6 +289,7 @@
       (row.missing ? ' <span class="tag missing">凭证已消失</span>' : "") + "</td>";
     html += '<td class="muted">' + esc(row.provider || "–") + "</td>";
     html += '<td class="num">' + usd(row.spent_usd) +
+      (row.last_tier ? '<small class="muted" style="display:block">按 ' + esc(row.last_tier) + " 计价</small>" : "") +
       (row.unpriced_requests ? '<small class="muted" style="display:block">' + row.unpriced_requests + " 次未定价</small>" : "") + "</td>";
     html += '<td class="num">' + (row.limit_usd ? usd(row.limit_usd) : '<span class="muted">不限</span>') + "</td>";
     html += '<td><div class="bar ' + cls + '"><i style="width:' + (ratio * 100).toFixed(1) + '%"></i></div></td>';
@@ -339,7 +340,8 @@
     document.getElementById("t-exhausted").textContent = totals.exhausted || 0;
     document.getElementById("t-spent").textContent = usd(totals.spent_usd);
     var book = data.price_book || {};
-    document.getElementById("t-price").textContent = (book.models || 0) + " 个模型";
+    document.getElementById("t-price").textContent = (book.models || 0) + " 个模型" +
+      (book.tiered ? " · " + book.tiered + " 个分段" : "");
     document.getElementById("t-price").title = book.fetched_at
       ? "抓取于 " + timeText(book.fetched_at) + (book.last_error ? "；最近一次失败：" + book.last_error : "")
       : "价目表为空";

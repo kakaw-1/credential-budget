@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -116,34 +117,64 @@ func handleUsage(request []byte) []byte {
 	}
 
 	model := firstNonEmpty(record.Model, record.ResponseModel, record.Alias)
-	rates, _, priced := rt.ledger.priceBook().lookup(model, rt.cfg.OverrideRates)
-	limitMicro, limitSource := rt.cfg.defaultLimitFor(record.Provider)
-	settle := settleInput{
-		Key:                key,
-		AuthIndex:          record.AuthIndex,
-		Provider:           record.Provider,
-		BaseURL:            record.BaseURL,
-		Model:              model,
-		Unpriced:           !priced,
-		At:                 settleTime(record),
-		DefaultLimitMicro:  limitMicro,
-		DefaultLimitSource: limitSource,
-	}
+	price, _, priced := rt.ledger.priceBook().lookup(model, rt.cfg.OverrideRates)
+	at := settleTime(record)
+	tierLabel := ""
 	if !priced {
 		if rt.cfg.UnpricedPolicy == "skip" {
-			rt.ledger.settle(settle)
+			limitMicro, limitSource := rt.cfg.defaultLimitFor(record.Provider)
+			rt.ledger.settle(settleInput{
+				Key: key, AuthIndex: record.AuthIndex, Provider: record.Provider,
+				BaseURL: record.BaseURL, Model: model, Unpriced: true, At: at,
+				DefaultLimitMicro: limitMicro, DefaultLimitSource: limitSource,
+			})
 			return okEnvelope(map[string]any{})
 		}
-		rates = rt.cfg.FallbackRates
+		price = modelPrice{Base: rt.cfg.FallbackRates}
+	}
+	// The tier is chosen by the full input (cached tokens included), the same
+	// key the price book gates on.
+	rates, tier := price.rateCard(usage.Input, at)
+	if tier != nil {
+		tierLabel = tierLabelFor(tier)
 	}
 	cost, errQuote := quoteMicro(rates, usage, rt.cfg.ChannelMultiplier)
 	if errQuote != nil {
 		appendLog("usage.handle: " + errQuote.Error())
 		return okEnvelope(map[string]any{})
 	}
-	settle.CostMicro = cost
-	rt.ledger.settle(settle)
+	limitMicro, limitSource := rt.cfg.defaultLimitFor(record.Provider)
+	rt.ledger.settle(settleInput{
+		Key:                key,
+		AuthIndex:          record.AuthIndex,
+		Provider:           record.Provider,
+		BaseURL:            record.BaseURL,
+		Model:              model,
+		CostMicro:          cost,
+		Unpriced:           !priced,
+		At:                 at,
+		DefaultLimitMicro:  limitMicro,
+		DefaultLimitSource: limitSource,
+		TierLabel:          tierLabel,
+	})
 	return okEnvelope(map[string]any{})
+}
+
+// tierLabelFor names the applied step so the panel can show why a request cost
+// more than the base rate suggests.
+func tierLabelFor(tier *priceTier) string {
+	if tier == nil {
+		return ""
+	}
+	switch {
+	case tier.MinPromptTokens > 0 && tier.hasWindow():
+		return fmt.Sprintf("≥%dk · %04d-%04d UTC", tier.MinPromptTokens/1000, *tier.UTCStart, *tier.UTCEnd)
+	case tier.MinPromptTokens > 0:
+		return fmt.Sprintf("≥%dk tokens", tier.MinPromptTokens/1000)
+	case tier.hasWindow():
+		return fmt.Sprintf("%04d-%04d UTC", *tier.UTCStart, *tier.UTCEnd)
+	}
+	return ""
 }
 
 // settleTime prefers the host's receive time so a queued record keeps its order.

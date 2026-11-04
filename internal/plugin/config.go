@@ -10,12 +10,68 @@ import (
 )
 
 // pricesYAML is the operator-facing shape of one rate card. Rates are USD per
-// 1M tokens, the same unit the OpenRouter price book uses.
+// 1M tokens, the same unit the OpenRouter price book uses. `tiers` carries the
+// conditional prices, e.g. a higher rate for input beyond 200k tokens.
 type pricesYAML struct {
-	Prompt     *float64 `yaml:"prompt" json:"prompt"`
-	Completion *float64 `yaml:"completion" json:"completion"`
-	CacheRead  *float64 `yaml:"cache_read" json:"cache_read"`
-	CacheWrite *float64 `yaml:"cache_write" json:"cache_write"`
+	Prompt     *float64   `yaml:"prompt" json:"prompt"`
+	Completion *float64   `yaml:"completion" json:"completion"`
+	CacheRead  *float64   `yaml:"cache_read" json:"cache_read"`
+	CacheWrite *float64   `yaml:"cache_write" json:"cache_write"`
+	Tiers      []tierYAML `yaml:"tiers" json:"tiers"`
+}
+
+// tierYAML is one conditional price in the operator's config.
+type tierYAML struct {
+	MinPromptTokens int64    `yaml:"min_prompt_tokens" json:"min_prompt_tokens"`
+	UTCStart        *int     `yaml:"utc_start" json:"utc_start"`
+	UTCEnd          *int     `yaml:"utc_end" json:"utc_end"`
+	Prompt          *float64 `yaml:"prompt" json:"prompt"`
+	Completion      *float64 `yaml:"completion" json:"completion"`
+	CacheRead       *float64 `yaml:"cache_read" json:"cache_read"`
+	CacheWrite      *float64 `yaml:"cache_write" json:"cache_write"`
+}
+
+func (t tierYAML) toTier() (priceTier, error) {
+	tier := priceTier{
+		MinPromptTokens: t.MinPromptTokens,
+		UTCStart:        t.UTCStart,
+		UTCEnd:          t.UTCEnd,
+		PromptPer1M:     t.Prompt,
+		CompletionPer1M: t.Completion,
+		CacheReadPer1M:  t.CacheRead,
+		CacheWritePer1M: t.CacheWrite,
+	}
+	if tier.MinPromptTokens < 0 {
+		return priceTier{}, fmt.Errorf("tiers.min_prompt_tokens must not be negative")
+	}
+	for _, item := range []struct {
+		name  string
+		value *float64
+	}{
+		{"tiers.prompt", tier.PromptPer1M},
+		{"tiers.completion", tier.CompletionPer1M},
+		{"tiers.cache_read", tier.CacheReadPer1M},
+		{"tiers.cache_write", tier.CacheWritePer1M},
+	} {
+		if item.value == nil {
+			continue
+		}
+		if math.IsNaN(*item.value) || math.IsInf(*item.value, 0) || *item.value < 0 {
+			return priceTier{}, fmt.Errorf("%s must be a non-negative number", item.name)
+		}
+	}
+	for _, clock := range []*int{tier.UTCStart, tier.UTCEnd} {
+		if clock == nil {
+			continue
+		}
+		if *clock < 0 || *clock > 2359 {
+			return priceTier{}, fmt.Errorf("tiers.utc_start/utc_end must be HHMM between 0 and 2359")
+		}
+	}
+	if !tier.hasCondition() {
+		return priceTier{}, fmt.Errorf("a tier needs min_prompt_tokens or both utc_start and utc_end")
+	}
+	return tier, nil
 }
 
 func (p pricesYAML) toRates(fallback priceRates) (priceRates, error) {
@@ -41,6 +97,23 @@ func (p pricesYAML) toRates(fallback priceRates) (priceRates, error) {
 	return rates, nil
 }
 
+// toModelPrice builds a full card: the base rates plus this override's tiers.
+func (p pricesYAML) toModelPrice(fallback priceRates) (modelPrice, error) {
+	rates, errRates := p.toRates(fallback)
+	if errRates != nil {
+		return modelPrice{}, errRates
+	}
+	price := modelPrice{Base: rates}
+	for index, entry := range p.Tiers {
+		tier, errTier := entry.toTier()
+		if errTier != nil {
+			return modelPrice{}, fmt.Errorf("tiers[%d]: %w", index, errTier)
+		}
+		price.Tiers = append(price.Tiers, tier)
+	}
+	return price, nil
+}
+
 // Config is the plugin's own block under plugins.configs.<id>.
 type Config struct {
 	DefaultLimitUSD   float64 `yaml:"default_limit_usd"`
@@ -61,7 +134,7 @@ type Config struct {
 
 	// Derived, not read from YAML.
 	FallbackRates priceRates            `yaml:"-" json:"-"`
-	OverrideRates map[string]priceRates `yaml:"-" json:"-"`
+	OverrideRates map[string]modelPrice `yaml:"-" json:"-"`
 }
 
 func defaultConfig() Config {
@@ -73,7 +146,7 @@ func defaultConfig() Config {
 		UnpricedPolicy:    "fallback",
 		ChannelMultiplier: 1,
 		FallbackRates:     defaultFallbackRates(),
-		OverrideRates:     map[string]priceRates{},
+		OverrideRates:     map[string]modelPrice{},
 	}
 }
 
@@ -186,17 +259,17 @@ func parseConfig(raw []byte) (Config, error) {
 		return Config{}, errFallback
 	}
 	cfg.FallbackRates = fallback
-	overrides := make(map[string]priceRates, len(cfg.PriceOverrides))
+	overrides := make(map[string]modelPrice, len(cfg.PriceOverrides))
 	for model, entry := range cfg.PriceOverrides {
 		key := strings.TrimSpace(model)
 		if key == "" {
 			continue
 		}
-		rates, errRates := entry.toRates(cfg.FallbackRates)
-		if errRates != nil {
-			return Config{}, fmt.Errorf("price_overrides[%s]: %w", key, errRates)
+		price, errPrice := entry.toModelPrice(cfg.FallbackRates)
+		if errPrice != nil {
+			return Config{}, fmt.Errorf("price_overrides[%s]: %w", key, errPrice)
 		}
-		overrides[strings.ToLower(key)] = rates
+		overrides[strings.ToLower(key)] = price
 	}
 	cfg.OverrideRates = overrides
 	return cfg, nil
@@ -226,7 +299,7 @@ func (c Config) publicView() map[string]any {
 	}
 }
 
-func overrideModels(rates map[string]priceRates) []string {
+func overrideModels(rates map[string]modelPrice) []string {
 	models := make([]string, 0, len(rates))
 	for model := range rates {
 		models = append(models, model)

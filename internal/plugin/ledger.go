@@ -40,6 +40,9 @@ type Credential struct {
 	BaseURL string `json:"base_url,omitempty"`
 	// Model is the most recent model served by this credential.
 	Model string `json:"last_model,omitempty"`
+	// LastTier names the price step the most recent request fell into, e.g.
+	// "≥200k tokens". Empty means the base card applied.
+	LastTier string `json:"last_tier,omitempty"`
 	// LimitMicroUSD is the one-time budget in micro-USD. Zero means unlimited.
 	LimitMicroUSD int64 `json:"limit_micro_usd"`
 	// LimitSource is manual when an operator set the budget, default when it was
@@ -283,6 +286,7 @@ type settleInput struct {
 	At                 time.Time
 	DefaultLimitMicro  int64
 	DefaultLimitSource string
+	TierLabel          string
 }
 
 // settle records one settled request against a credential. It returns the row
@@ -320,6 +324,7 @@ func (l *ledger) settle(in settleInput) (Credential, bool) {
 	if in.Model != "" {
 		row.Model = in.Model
 	}
+	row.LastTier = in.TierLabel
 	row.Missing = false
 	if in.CostMicro > 0 {
 		row.SpentMicroUSD += in.CostMicro

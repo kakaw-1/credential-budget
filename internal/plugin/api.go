@@ -135,6 +135,7 @@ type credentialView struct {
 	Tail             string     `json:"tail,omitempty"`
 	BaseURL          string     `json:"base_url,omitempty"`
 	LastModel        string     `json:"last_model,omitempty"`
+	LastTier         string     `json:"last_tier,omitempty"`
 	Provider         string     `json:"provider,omitempty"`
 	Label            string     `json:"label,omitempty"`
 	LimitUSD         float64    `json:"limit_usd"`
@@ -191,6 +192,7 @@ func toView(row Credential) credentialView {
 		Tail:             idTail(row),
 		BaseURL:          row.BaseURL,
 		LastModel:        row.Model,
+		LastTier:         row.LastTier,
 		Provider:         row.Provider,
 		Label:            row.Label,
 		LimitUSD:         microToUSD(row.effectiveLimit()),
@@ -446,7 +448,7 @@ func priceSyncResponse() managementResponse {
 	if rt == nil {
 		return jsonError(http.StatusServiceUnavailable, "插件尚未初始化")
 	}
-	if errRefresh := refreshPriceBook(rt.ledger, rt.cfg, nil); errRefresh != nil {
+	if errRefresh := refreshPriceBook(rt.ledger, rt.cfg, nil, true); errRefresh != nil {
 		return jsonError(http.StatusBadGateway, "刷新价目表失败："+errRefresh.Error())
 	}
 	return jsonResponse(http.StatusOK, map[string]any{"price_book": rt.ledger.priceBook().summary()})

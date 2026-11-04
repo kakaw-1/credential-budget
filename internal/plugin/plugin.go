@@ -17,7 +17,7 @@ const (
 	// the plugins.configs key and the management routes all derive from it.
 	PluginID = "credential-budget"
 	// PluginVersion is the release version. A tag must match it.
-	PluginVersion = "0.1.1"
+	PluginVersion = "0.1.2"
 	// ABIVersion is the native C ABI version this plugin was built against.
 	ABIVersion = 1
 	// SchemaVersion is the RPC JSON contract version. 10 is the newest CPA
