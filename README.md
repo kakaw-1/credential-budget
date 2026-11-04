@@ -52,13 +52,15 @@ plugins:
 
 **3. 启用**，见下方"启用"一节。
 
-也可以直接调接口装：
+也可以直接调接口装。**不要写 `version`**，不写才会装最新 release；写上就等于把版本钉死，写 `0.1.0` 就永远装 0.1.0：
 
 ```sh
 curl -X POST http://127.0.0.1:8317/v8/management/plugins/store/credential-budget/install \
   -H "Authorization: Bearer $MANAGEMENT_KEY" -H 'Content-Type: application/json' \
-  -d '{"version":"0.1.0"}'
+  -d '{}'
 ```
+
+升级到新版同样调这个接口、同样不写 `version`；装完看返回体里的 `version` 和落地的 `.so` 文件名核对。
 
 ### 手动安装
 
