@@ -87,6 +87,31 @@ groups [{count: 2, exhausted: 1, limited: 2, provider: openai-compatible-mock, s
 5刀-B 备用      http://127.0.0.1:9099/v1 · #9c2bc6     $0.003 / $0.005   限额中
 ```
 
+## 第三轮：一次请求带出同供应商的全部 key
+
+同一个 `openai-compatibility` 上游配 3 条 key，只发**一个**请求：
+
+```
+scheduler.pick: registered 3 new credential(s) from the candidate list
+openai-compatibility:mock:533899238533  limit=0.005 spends=0.003 observed_only=False
+openai-compatibility:mock:6a5b9975e57a  limit=0.005 spends=0      observed_only=True
+openai-compatibility:mock:c7ad9ed46668  limit=0.005 spends=0      observed_only=True
+totals: {credentials: 3, exhausted: 0, limited: 3, spent_usd: 0.003}
+```
+
+一条 key 发生结算，另外两条从未被轮到，但它们已经在面板里、已经带 `provider_limits` 的 $0.005、可以立刻单独改额度。这条路径是配置型 key 唯一能被"发现"的通道——`host.auth.list` 只列物理 auth 文件。
+
+## 商店安装与升级（v0.1.1）
+
+```
+GET  /v8/management/plugins/store              → credential-budget 0.1.1, github-release
+POST /v8/management/plugins/store/credential-budget/install {"version":"0.1.1"}
+                                                → 200 installed, plugins/linux/amd64/credential-budget-v0.1.1.so
+pluginhost: plugin loaded version=0.1.1        → 热加载，restart_required=false
+```
+
+v0.1.0 与 v0.1.1 都从商店装过一遍，CI 的 tag↔版本一致性门禁把版本和 release 资产名绑在一起。
+
 ## 单元测试
 
 ```
