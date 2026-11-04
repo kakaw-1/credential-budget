@@ -151,7 +151,10 @@ type credentialView struct {
 	Missing          bool       `json:"missing"`
 	LimitSource      string     `json:"limit_source,omitempty"`
 	Status           string     `json:"status"`
-	LastRequestAt    *time.Time `json:"last_request_at,omitempty"`
+	// ObservedOnly marks a credential that the host offered for routing but that
+	// has never settled a request: its spend is a real zero, not a missing value.
+	ObservedOnly  bool       `json:"observed_only"`
+	LastRequestAt *time.Time `json:"last_request_at,omitempty"`
 }
 
 // displayName is what the operator reads first: their own alias, then the host
@@ -201,6 +204,7 @@ func toView(row Credential) credentialView {
 		DisableError:     row.DisableError,
 		Missing:          row.Missing,
 		LimitSource:      row.LimitSource,
+		ObservedOnly:     row.Requests == 0,
 		LastRequestAt:    row.LastRequestAt,
 	}
 	if remaining := row.remaining(); remaining >= 0 {

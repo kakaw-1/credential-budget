@@ -443,6 +443,64 @@ func TestAliasNamesACredential(t *testing.T) {
 	}
 }
 
+func TestSchedulerRegistersEveryCandidateOfAProvider(t *testing.T) {
+	_, rt := setupRuntime(t, `
+price_source: "off"
+provider_limits:
+  openai-compatible-mock: 0.005
+fallback_price: {prompt: 1, completion: 1, cache_read: 1, cache_write: 1}
+`)
+
+	// One request routed by a provider with three configured keys reveals all
+	// three, not just the one that serves it.
+	request, _ := json.Marshal(map[string]any{
+		"Provider": "openai-compatible-mock",
+		"Model":    "gpt-4o-mini",
+		"Candidates": []map[string]any{
+			{"ID": "openai-compatibility:mock:aaa", "Provider": "openai-compatible-mock", "Attributes": map[string]string{"base_url": "https://up.example/v1", "auth_index": "idx-a"}},
+			{"ID": "openai-compatibility:mock:bbb", "Provider": "openai-compatible-mock", "Attributes": map[string]string{"base_url": "https://up.example/v1", "auth_index": "idx-b"}},
+			{"ID": "openai-compatibility:mock:ccc", "Provider": "openai-compatible-mock", "Attributes": map[string]string{"base_url": "https://up.example/v1", "auth_index": "idx-c"}},
+		},
+	})
+	handlePick(request)
+
+	rows := rt.ledger.rows()
+	if len(rows) != 3 {
+		t.Fatalf("ledger holds %d rows, want 3: %+v", len(rows), rows)
+	}
+	for _, row := range rows {
+		if row.LimitMicroUSD != 5000 {
+			t.Fatalf("%s limit = %d, want 5000 from provider_limits", row.Key, row.LimitMicroUSD)
+		}
+		if row.SpentMicroUSD != 0 || row.Requests != 0 {
+			t.Fatalf("%s already has spend/requests: %+v", row.Key, row)
+		}
+		if row.BaseURL != "https://up.example/v1" {
+			t.Fatalf("%s base_url = %q", row.Key, row.BaseURL)
+		}
+		if view := toView(row); !view.ObservedOnly {
+			t.Fatalf("%s should read as observed-only", row.Key)
+		}
+	}
+
+	// A second pick must not reset a budget or a spend an operator already set.
+	if _, _, errLimit := rt.ledger.setLimit("openai-compatibility:mock:bbb", 9_000_000); errLimit != nil {
+		t.Fatalf("setLimit: %v", errLimit)
+	}
+	if _, errAlias := rt.ledger.setAlias("openai-compatibility:mock:bbb", "5刀-B"); errAlias != nil {
+		t.Fatalf("setAlias: %v", errAlias)
+	}
+	handleUsage(usagePayload("openai-compatibility:mock:bbb", "idx-b", "gpt-4o-mini", 100, 0))
+	handlePick(request)
+	row, _ := rt.ledger.row("openai-compatibility:mock:bbb")
+	if row.LimitMicroUSD != 9_000_000 || row.Alias != "5刀-B" || row.SpentMicroUSD == 0 {
+		t.Fatalf("re-observing overwrote operator state: %+v", row)
+	}
+	if view := toView(row); view.ObservedOnly {
+		t.Fatal("a credential that served a request must not read as observed-only")
+	}
+}
+
 func TestLedgerSurvivesReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")

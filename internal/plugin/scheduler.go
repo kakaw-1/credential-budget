@@ -55,6 +55,10 @@ func handlePick(request []byte) []byte {
 	if len(req.Candidates) == 0 {
 		return okEnvelope(schedulerPickResponse{})
 	}
+	// Every routed request reveals the rest of the provider's credentials. A
+	// config-backed key has no auth file, so this candidate list is the only
+	// place it can be discovered before it has ever served a request.
+	registerCandidates(rt, req)
 	exhausted := rt.ledger.exhaustedKeys()
 	if rt.cfg.Debug {
 		appendLog(fmt.Sprintf("scheduler.pick: provider=%s model=%s candidates=%d exhausted_rows=%d", req.Provider, req.Model, len(req.Candidates), len(exhausted)))
@@ -114,4 +118,28 @@ func candidateExhausted(candidate schedulerCandidate, exhausted map[string]bool)
 		}
 	}
 	return false
+}
+
+// registerCandidates records every credential the host offered for this route,
+// so a provider's whole key set shows up in the panel after the first request
+// instead of only the keys that happened to serve one.
+func registerCandidates(rt *runtimeState, req schedulerPickRequest) {
+	created := 0
+	for _, candidate := range req.Candidates {
+		key := strings.TrimSpace(candidate.ID)
+		if key == "" {
+			continue
+		}
+		provider := firstNonEmpty(candidate.Provider, req.Provider)
+		limitMicro, limitSource := rt.cfg.defaultLimitFor(provider)
+		if rt.ledger.observe(key, strings.TrimSpace(candidate.Attributes["auth_index"]), provider, strings.TrimSpace(candidate.Attributes["base_url"]), limitMicro, limitSource) {
+			created++
+		}
+	}
+	if created > 0 {
+		rt.ledger.persist()
+		if rt.cfg.Debug {
+			appendLog(fmt.Sprintf("scheduler.pick: registered %d new credential(s) from the candidate list", created))
+		}
+	}
 }

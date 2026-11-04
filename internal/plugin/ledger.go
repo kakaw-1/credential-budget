@@ -370,6 +370,53 @@ func (l *ledger) setAlias(key, alias string) (Credential, error) {
 	return *row, nil
 }
 
+// observe registers a credential the host offered for routing, even before it
+// has settled a request. This is the only way a config-backed key becomes
+// visible: host.auth.list only lists physical auth files.
+//
+// An existing row keeps its budget, spend and alias; only the descriptive fields
+// are refreshed. It reports whether a new row was created.
+func (l *ledger) observe(key, authIndex, provider, baseURL string, defaultLimitMicro int64, defaultLimitSource string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if row, ok := l.state.Credentials[key]; ok {
+		changed := false
+		if provider != "" && row.Provider != provider {
+			row.Provider = provider
+			changed = true
+		}
+		if baseURL != "" && row.BaseURL != baseURL {
+			row.BaseURL = baseURL
+			changed = true
+		}
+		if authIndex != "" && row.AuthIndex == "" {
+			row.AuthIndex = authIndex
+			changed = true
+		}
+		if changed {
+			now := unixNow()
+			row.UpdatedAt = &now
+		}
+		return false
+	}
+	now := unixNow()
+	l.state.Credentials[key] = &Credential{
+		Key:           key,
+		AuthIndex:     authIndex,
+		Provider:      provider,
+		BaseURL:       baseURL,
+		LimitMicroUSD: defaultLimitMicro,
+		LimitSource:   defaultLimitSource,
+		UpdatedAt:     &now,
+	}
+	l.auditLocked("credential_observed", key, fmt.Sprintf("provider=%s limit=%s", provider, formatUSD(defaultLimitMicro)))
+	return true
+}
+
 // setLimit stores an operator-provided budget. Zero means unlimited.
 func (l *ledger) setLimit(key string, limitMicro int64) (Credential, bool, error) {
 	l.mu.Lock()

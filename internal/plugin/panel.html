@@ -293,13 +293,16 @@
     html += '<td class="num">' + (row.limit_usd ? usd(row.limit_usd) : '<span class="muted">不限</span>') + "</td>";
     html += '<td><div class="bar ' + cls + '"><i style="width:' + (ratio * 100).toFixed(1) + '%"></i></div></td>';
     html += '<td><span class="tag ' + row.status + '">' + (STATUS_TEXT[row.status] || row.status) + "</span>" +
+      (row.observed_only ? '<small class="muted" style="display:block">未使用</small>' : "") +
       (row.disabled_by_plugin ? '<small class="muted" style="display:block">已置为 disabled</small>' : "") +
       (row.disable_error ? '<small class="err" style="display:block" title="' + esc(row.disable_error) + '">禁用失败</small>' : "") + "</td>";
     html += '<td class="muted num">' + (row.last_request_at ? timeText(row.last_request_at) : "–") +
       (row.last_model ? '<small class="mono" style="display:block">' + esc(row.last_model) + "</small>" : "") + "</td>";
     html += '<td><div class="actions">' +
       '<button class="small" data-act="edit" data-key="' + esc(row.key) + '">' + (open ? "收起" : "设置") + "</button>" +
-      '<button class="small danger" data-act="unseal" data-key="' + esc(row.key) + '">解封</button>' +
+      ((row.exhausted || row.disabled_by_plugin)
+        ? '<button class="small danger" data-act="unseal" data-key="' + esc(row.key) + '">解封</button>'
+        : "") +
       "</div></td>";
     html += "</tr>";
 
