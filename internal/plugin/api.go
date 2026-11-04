@@ -436,7 +436,7 @@ func syncResponse() managementResponse {
 	if rt == nil {
 		return jsonError(http.StatusServiceUnavailable, "插件尚未初始化")
 	}
-	if errSync := syncCredentials(rt.ledger); errSync != nil {
+	if errSync := syncCredentials(rt.ledger, rt.cfg); errSync != nil {
 		return jsonError(http.StatusBadGateway, "同步凭证失败："+errSync.Error())
 	}
 	rt.ledger.persist()

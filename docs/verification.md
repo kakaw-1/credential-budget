@@ -129,6 +129,31 @@ OpenRouter 真实价目表：一次刷新拿到 **361 个模型，其中 58 个�
 
 顺带修掉一个自扰问题：宿主启动时会多次调用 `plugin.register` / `reconfigure`，每次都装一个新的刷新协程，原先会连着打好几次 OpenRouter；加了 5 分钟冷却（手动「刷新价目」按钮用 force 绕过），同一次启动只发一次请求。
 
+## 第五轮：零流量枚举全部供应商的 key（v0.1.3）
+
+问题：v0.1.1 靠 `scheduler.pick` 的候选列表登记凭证，因此（a）没发过请求的供应商一条都看不到，（b）一个供应商的 key 分散在不同 `priority` 层时，只登记当次候选所在层。
+
+改法：插件启动 2 秒后调用 `host.auth.models`（不带 `auth_index`），主机返回运行时认证管理器里的全部凭证 `{id, auth_index, provider, models}`；按 `id` 建行、按 `provider` 套 `provider_limits`。`host.auth.list` 退化为补充（只用来取 auth 文件名/邮箱做展示名）。
+
+实测（`/tmp/e2e13`，两个 `openai-compatibility` 供应商各 2 条 key，**全程零请求**）：
+
+```
+[credential-budget] startup enumeration: 4 credential(s) known to the runtime
+```
+
+| 凭证 ID | 供应商 | 额度 | 已用 | 状态 |
+| --- | --- | --- | --- | --- |
+| `openai-compatibility:alpha:1e6db0075e76` | openai-compatible-alpha | $5.00 | $0 | 未使用 |
+| `openai-compatibility:alpha:5dcf4da753e4` | openai-compatible-alpha | $5.00 | $0 | 未使用 |
+| `openai-compatibility:beta:57f6e9083298` | openai-compatible-beta | $0.01 | $0 | 未使用 |
+| `openai-compatibility:beta:7e2e66e83f4c` | openai-compatible-beta | $0.01 | $0 | 未使用 |
+
+面板同时显示两个供应商分组，组头 `2 条 · 已设额度 2 · 已停用 0 · 合计 $0`。
+
+同一配置改回旧的 `keys:` 写法（`/tmp/e2e12`）只有 **2 行**：CPA 把一个供应商的多条 key 归并成一个连接池凭证（`openai-compatibility:alpha:a9ebf683142e`），运行时只有一个身份，插件无从拆分。所以「按 key 限额」的前提是 `api-key-entries:`。
+
+顺带修掉一个键冲突：`credentialKey` 在没有 auth ID 时退回裸 `auth_index`，而每个供应商都从 0 开始编号，两个供应商的 0 号 key 会落到同一行（后写覆盖先写）。现在回退键是 `<provider>#<index>`，有真实 ID 时仍用 ID。
+
 ## 单元测试
 
 ```

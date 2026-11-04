@@ -265,12 +265,25 @@ func (l *ledger) auditLocked(action, key, detail string) {
 	l.state.Audit = append(l.state.Audit, auditEntry{At: unixNow(), Action: action, Key: key, Detail: detail})
 }
 
-// credentialKey picks the ledger key for one settled request.
-func credentialKey(authID, authIndex string) string {
-	if authID != "" {
-		return authID
+// credentialKey picks the ledger key for one credential.
+//
+// The auth ID is already unique across providers, so it is used as-is when the
+// host supplies one. Falling back to the bare auth index would collide: every
+// provider numbers its own keys from zero, so two providers' keys would land on
+// the same row and the later one would overwrite the earlier one. The provider
+// is therefore part of the fallback key.
+func credentialKey(authID, provider, authIndex string) string {
+	if id := strings.TrimSpace(authID); id != "" {
+		return id
 	}
-	return authIndex
+	index := strings.TrimSpace(authIndex)
+	if index == "" {
+		return ""
+	}
+	if name := strings.TrimSpace(provider); name != "" {
+		return name + "#" + index
+	}
+	return index
 }
 
 // settleInput is one settled request, reduced to what the ledger records.

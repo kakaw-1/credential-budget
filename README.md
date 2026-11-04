@@ -171,7 +171,21 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 
 **怎么认出是那张 key**：每行主标题按优先级取 `备注名 > 主机上报的名字/邮箱 > auth 文件名 > 运行时 ID`，第二行小字给 `上游 base-url · #ID后6位`，最近使用时间下面标出这次用的模型。OAuth 账号通常直接显示邮箱；配置型 key（`api-keys`）只有 `openai-compatibility:mock:68bc4482762f` 这种哈希，认不出就点「设置」给它起个备注名，比如「5刀-A」。
 
-**一个供应商下的多条 key 会全部列出来。** 配置型 key 没有 auth 文件，`host.auth.list`（也就是「同步凭证」按钮）拉不到它们；插件的做法是**在每次调度时把该供应商的全部候选登记进账本**。所以只要这个供应商**发过一次请求**，它名下所有 key 就都会出现——已经服务过的那条显示已用金额，其余标「未使用」（已用 $0），额度按 `provider_limits` 预置，可以立刻逐条调额度。零流量时仍然列不出来，因为 CPA 没有给插件读配置的接口。
+**一个供应商下的多条 key 会全部列出来，不需要先发请求。** 插件启动后 2 秒调用 `host.auth.models`（不带 `auth_index`），拿到运行时认证管理器里的**全部**凭证，连同所属供应商一起登记进账本：每条 key 一行，额度按 `provider_limits` 或 `default_limit_usd` 预置，状态标「未使用」（已用 $0），可以立刻逐条改额度。面板上的「同步凭证」按钮会再跑一次同样的枚举。`host.auth.list` 只列 auth 目录里的物理文件，配置型 key 一条都拉不到——所以早期版本用它是错的。
+
+**想让一个供应商下的多条 key 各自独立记账，必须写在 `api-key-entries` 里。**
+
+```yaml
+openai-compatibility:
+  - name: alpha
+    base-url: https://api.example.com/v1
+    api-key-entries:          # ✅ 每条 key 一个独立凭证，各自记账、各自限额
+      - api-key: sk-alpha-1
+      - api-key: sk-alpha-2
+      - api-key: sk-alpha-3
+```
+
+旧的 `keys:` 写法（`keys: [{api-key: a}, {api-key: b}]`）会被 CPA 归并成**一个连接池凭证**：运行时只有一条 auth 记录，所有 key 共用一个额度，面板也只能显示一行。这不是插件漏读，而是 CPA 层面就只有这一个身份。想按 key 限额就必须换成 `api-key-entries:`。
 
 **设置** 展开后可以同时改备注名和额度，一次保存；**解封** 清零已用并放开该凭证。
 
@@ -185,7 +199,7 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 ## 行为边界（重要）
 
 1. **硬上限做不到 100% 不超。** 预检在请求前、结算在响应后，进行中的请求会把额度花穿一点（典型是最后一次请求的整笔费用）。要绝对不超只能按 `max_tokens` 预留，插件没这么做。
-2. **运行时凭证只能靠调度拦。** `api-keys` 里的 key 没有物理文件，`host.auth.save` 不适用，面板会显示「禁用失败」。这类凭证靠 ② 兜住。它们的**发现**也受同一个限制：靠调度候选登记，所以要发过一次请求才看得见；候选只含当前优先级层里可用的凭证，配了不同 `priority` 的低层 key 可能暂时不出现。
+2. **运行时凭证只能靠调度拦。** `api-keys` 里的 key 没有物理文件，`host.auth.save` 不适用，面板会显示「禁用失败」。这类凭证靠 ② 兜住。**发现**不成问题：插件启动时和点「同步凭证」时都会枚举 `host.auth.models`，把所有供应商的所有 key 一次列全，不受优先级层限制。但**记账粒度受 CPA 配置形态限制**：写在 `api-key-entries` 里才是每条 key 一个凭证；写在旧的 `keys:` 里会被 CPA 归并成一个连接池凭证，所有 key 共用一个额度。
 3. **全部凭证过额时，默认直接拒绝**（HTTP 500 + `credential_budget_exhausted`）。CPA 的调度拒绝没有独立状态码位，所以是 500 而不是 429；要让它继续调度就设 `on_all_exhausted: pass`。
 4. **写 disabled 会把整份凭证 JSON 写回**，`access_token` / `refresh_token` 等字段原样保留。极端情况下若恰好有 token 刷新发生在读与写之间，写回的是稍旧的一份 token——凭证本来就会被禁用，解封后 CPA 会自行刷新。
 5. **额度只在账本里**，删掉状态文件等于全部重置（未解封的 disabled 不会自动恢复）。
@@ -223,6 +237,8 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 
 | 现象 | 原因 |
 | --- | --- |
+| 一个供应商下多条 key 只显示一行 | 这些 key 写在 `keys:` 里，被 CPA 归并成一个连接池凭证；改用 `api-key-entries:` |
+| 面板看不到某个供应商 | 该供应商的 key 写法同上；或插件版本低于 0.1.3（旧版只靠调度候选登记）。点「同步凭证」，`debug: true` 时会打印 `startup enumeration: N credential(s)` |
 | 面板看不到凭证 | 先点「同步凭证」；或该凭证还没被用过（记账是请求结算后才产生） |
 | 「禁用失败：credential not found in host.auth.list」 | 这是运行时凭证（`api-keys` 配置项），正常，靠调度否决 |
 | 额度到了还在跑 | 检查 `enforce`、`auto_disable`；开 `debug` 看 `scheduler.pick` 是否被调用 |

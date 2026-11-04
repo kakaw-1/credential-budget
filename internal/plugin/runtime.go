@@ -13,6 +13,10 @@ var (
 	refresher *priceBookRefresher
 )
 
+// startupSyncDelay gives the host time to register its auth records before the
+// plugin asks for them.
+const startupSyncDelay = 2 * time.Second
+
 // applyConfig installs (or reinstalls) the runtime for one configuration block.
 func applyConfig(cfg Config, firstLoad bool) error {
 	rtMu.Lock()
@@ -44,6 +48,25 @@ func applyConfig(cfg Config, firstLoad bool) error {
 	if !firstLoad {
 		appendLog("configuration reloaded")
 	}
+	// The host registers its credentials shortly after the plugin loads, so the
+	// first enumeration is deferred instead of racing the auth manager. Without
+	// it a provider only appears in the panel after it has served a request.
+	go func() {
+		time.Sleep(startupSyncDelay)
+		if runtime() != rt {
+			return
+		}
+		if errSync := syncCredentials(rt.ledger, rt.cfg); errSync != nil {
+			if rt.cfg.Debug {
+				appendLog("startup enumeration failed: " + errSync.Error())
+			}
+			return
+		}
+		rt.ledger.persist()
+		if rt.cfg.Debug {
+			appendLog(fmt.Sprintf("startup enumeration: %d credential(s) known to the runtime", len(rt.ledger.rows())))
+		}
+	}()
 	return nil
 }
 

@@ -409,6 +409,68 @@ fallback_price: {prompt: 1000, completion: 1000, cache_read: 1000, cache_write: 
 	}
 }
 
+func TestCredentialKeyKeepsProvidersApart(t *testing.T) {
+	// Both providers number their credentials from zero. Keying on the index
+	// alone would merge alpha#0 and beta#0 into one row, which is exactly the
+	// "only the last provider is listed" symptom.
+	alpha := credentialKey("", "openai-compatible-alpha", "0")
+	beta := credentialKey("", "openai-compatible-beta", "0")
+	if alpha == beta {
+		t.Fatalf("index-only keys collided: %q", alpha)
+	}
+	if alpha != "openai-compatible-alpha#0" {
+		t.Fatalf("alpha key = %q, want openai-compatible-alpha#0", alpha)
+	}
+	// A real auth ID is already globally unique and is kept verbatim.
+	if got := credentialKey("openai-compatibility:alpha:1149eb559164", "openai-compatible-alpha", "3"); got != "openai-compatibility:alpha:1149eb559164" {
+		t.Fatalf("auth ID was rewritten to %q", got)
+	}
+	if got := credentialKey("", "", ""); got != "" {
+		t.Fatalf("empty identity produced key %q", got)
+	}
+}
+
+func TestSyncSeedsEveryProviderFromTheRuntimeList(t *testing.T) {
+	_, rt := setupRuntime(t, `
+price_source: "off"
+default_limit_usd: 1
+provider_limits:
+  alpha: 5
+fallback_price: {prompt: 1000, completion: 1000, cache_read: 1000, cache_write: 1000}
+`)
+	credentials := []hostAuthModelEntry{
+		{ID: "openai-compatibility:alpha:aaa", AuthIndex: "0", Provider: "openai-compatible-alpha"},
+		{ID: "openai-compatibility:alpha:aaa-1", AuthIndex: "1", Provider: "openai-compatible-alpha"},
+		{ID: "openai-compatibility:beta:bbb", AuthIndex: "2", Provider: "openai-compatible-beta"},
+	}
+	seen := map[string]bool{}
+	for _, credential := range credentials {
+		key := credentialKey(credential.ID, credential.Provider, credential.AuthIndex)
+		limitMicro, limitSource := rt.cfg.defaultLimitFor(credential.Provider)
+		rt.ledger.observe(key, credential.AuthIndex, credential.Provider, "", limitMicro, limitSource)
+		seen[key] = true
+	}
+	if rows := rt.ledger.rows(); len(rows) != 3 {
+		t.Fatalf("rows = %d, want 3 (%v)", len(rows), rows)
+	}
+	alphaRow, _ := rt.ledger.row("openai-compatibility:alpha:aaa")
+	if alphaRow.LimitMicroUSD != 5_000_000 {
+		t.Fatalf("alpha limit = %d, want 5000000 from provider_limits", alphaRow.LimitMicroUSD)
+	}
+	betaRow, _ := rt.ledger.row("openai-compatibility:beta:bbb")
+	if betaRow.LimitMicroUSD != 1_000_000 || betaRow.LimitSource != "default" {
+		t.Fatalf("beta row = limit %d source %q, want the global default", betaRow.LimitMicroUSD, betaRow.LimitSource)
+	}
+	for _, row := range rt.ledger.rows() {
+		if !seen[row.Key] {
+			t.Fatalf("row %q was not enumerated", row.Key)
+		}
+		if row.Requests != 0 {
+			t.Fatalf("row %q should read as unused, got %d request(s)", row.Key, row.Requests)
+		}
+	}
+}
+
 func handleUsageWithProvider(t *testing.T, authID, provider, model string, input, output int64) {
 	t.Helper()
 	record := map[string]any{

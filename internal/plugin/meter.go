@@ -111,7 +111,7 @@ func handleUsage(request []byte) []byte {
 	if usage.empty() {
 		return okEnvelope(map[string]any{})
 	}
-	key := credentialKey(strings.TrimSpace(record.AuthID), strings.TrimSpace(record.AuthIndex))
+	key := credentialKey(strings.TrimSpace(record.AuthID), strings.TrimSpace(record.Provider), strings.TrimSpace(record.AuthIndex))
 	if key == "" {
 		return okEnvelope(map[string]any{})
 	}

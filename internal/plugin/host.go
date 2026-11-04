@@ -28,6 +28,21 @@ type hostAuthListResponse struct {
 	Files []hostAuthEntry `json:"files"`
 }
 
+// hostAuthModelEntry mirrors one credential from host.auth.models. Unlike
+// host.auth.list, which enumerates JSON files on disk, this call returns every
+// credential the runtime auth manager holds — including the ones synthesised
+// from `api-keys.openai-compatibility[].api-key-entries`, which have no file.
+type hostAuthModelEntry struct {
+	ID        string   `json:"id"`
+	AuthIndex string   `json:"auth_index"`
+	Provider  string   `json:"provider"`
+	Models    []string `json:"models"`
+}
+
+type hostAuthModelsResponse struct {
+	Credentials []hostAuthModelEntry `json:"credentials"`
+}
+
 type hostAuthGetResponse struct {
 	AuthIndex string          `json:"auth_index"`
 	Name      string          `json:"name,omitempty"`
@@ -159,16 +174,54 @@ func credentialLabel(entry hostAuthEntry) string {
 	return ""
 }
 
-// syncCredentials refreshes the ledger's descriptive fields from the host and
+// listAuthModels enumerates every credential the host's runtime auth manager
+// holds, config-backed keys included, with the models each one serves. This is
+// the only way to see the keys of a provider that has served no traffic yet.
+func listAuthModels() ([]hostAuthModelEntry, error) {
+	raw, errCall := invokeHost("host.auth.models", map[string]any{})
+	if errCall != nil {
+		return nil, errCall
+	}
+	var response hostAuthModelsResponse
+	if errUnmarshal := json.Unmarshal(raw, &response); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host.auth.models: %w", errUnmarshal)
+	}
+	return response.Credentials, nil
+}
+
+// syncCredentials refreshes the ledger from the host: it registers every
+// credential the runtime knows about, applies provider_limits to the ones it
+// has not seen before, enriches rows with the auth file's human label, and
 // flags rows whose credential disappeared.
-func syncCredentials(led *ledger) error {
+func syncCredentials(led *ledger, cfg Config) error {
+	seen := make(map[string]bool)
+	enumerated := false
+
+	// Enumerate first. A config-backed key never shows up in host.auth.list, so
+	// without this pass a provider only reveals its other keys once a request
+	// has already been routed through it.
+	if credentials, errModels := listAuthModels(); errModels == nil {
+		enumerated = true
+		for _, credential := range credentials {
+			key := credentialKey(credential.ID, credential.Provider, credential.AuthIndex)
+			if key == "" {
+				continue
+			}
+			seen[key] = true
+			limitMicro, limitSource := cfg.defaultLimitFor(credential.Provider)
+			led.observe(key, credential.AuthIndex, credential.Provider, "", limitMicro, limitSource)
+		}
+	}
+
 	entries, errList := listAuths(true)
 	if errList != nil {
+		if enumerated {
+			return nil
+		}
 		return errList
 	}
-	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
-		key := credentialKey(entry.ID, entry.AuthIndex)
+		key := credentialKey(entry.ID, entry.Provider, entry.AuthIndex)
 		if key == "" {
 			continue
 		}
