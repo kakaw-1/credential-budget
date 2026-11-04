@@ -1,0 +1,194 @@
+# cpa-plugin-credential-budget
+
+给 CLIProxyAPI 的上游凭证加一道**一次性美元额度**：给某个 key 设 $5，花到 $5 就停止使用，下游请求不会再落到它身上。**不会自动重置**，只能由人在面板上手动解封。
+
+适用于 Oh My CPA 面板（插件页面会被 OMC 原样托管在控制台里），也适用于 CPA 自带的管理中心。
+
+---
+
+## 它做什么
+
+- 按**单个上游凭证**（一个 OAuth 账号、或 `api-keys` 里的一条 key）累计花费。
+- 达到额度后立刻把该凭证停下，后续请求绕开它。
+- 面板里设额度、看进度、手动解封、看操作记录。
+
+## 它不做什么
+
+- 不做周期重置。没有日/周/月窗口，额度是一次性的，清零只能手动。
+- 不重排路由。停掉一个凭证之后走哪个凭证、是否降级到别的供应商，全交给 CPA 自己的调度。
+- 不改 `config.yaml`。额度与账本存在状态文件里，不走配置写回。
+
+---
+
+## 两个停止机制
+
+插件同时用两条腿走路，因为「凭证」有两种形态：
+
+**① 写 disabled（首选，物理凭证）**
+凭证达到额度后，插件调 `host.auth.get` 读出它的 JSON，把 `disabled` 置为 `true`，再调 `host.auth.save` 写回。CPA 会同时更新运行时记录，**它自己的所有调度器都会跳过这个凭证**，不需要重启，也不需要插件再插手。OAuth 账号（claude / codex / gemini …）走这条路。
+
+**② 调度否决（兜底，运行时凭证）**
+配置里的 `api-keys`（例如 `openai-compatibility` 的每条 key）没有物理文件，写不了 disabled。这类凭证靠 `scheduler.pick` 拦：插件发现本次候选里出现过额凭证，就直接从剩下的候选里挑一个返回；如果一个都不剩，按 `on_all_exhausted` 决定是拒绝请求（默认）还是交回网关。
+
+---
+
+## 安装
+
+### 插件商店
+
+CPA / OMC 的插件商店搜索 `cpa-credential-budget` 安装，然后在插件配置里启用。商店地址可以加：
+
+```
+https://raw.githubusercontent.com/kakaw-1/cpa-plugin-credential-budget/main/registry.json
+```
+
+### 手动安装
+
+在 CPA 的工作目录执行：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kakaw-1/cpa-plugin-credential-budget/main/install.sh | sh
+```
+
+或者从 Releases 下载对应平台的压缩包，把里面的 `.so` 放到 `plugins/linux/amd64/`（macOS 用 `plugins/darwin/<arch>/`，扩展名 `.dylib`）。
+
+### 启用
+
+```yaml
+plugins:
+  enabled: true
+  dir: "plugins"
+  configs:
+    cpa-credential-budget:
+      enabled: true
+      priority: 1
+      default_limit_usd: 5      # 新凭证默认额度（美元）；0 = 不限额
+      price_source: "openrouter"
+```
+
+重载配置即可生效，无需重启进程。确认加载成功：
+
+```sh
+grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registered
+```
+
+---
+
+## 配置项
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `default_limit_usd` | `0` | 新凭证第一次被记账时采用的额度（美元）。`0` 表示不限额，只在面板单独设。已存在的凭证不会被追溯修改。 |
+| `enforce` | `true` | 关掉后只记账不熔断，用来先观察一段时间。 |
+| `auto_disable` | `true` | 关掉后不写 disabled，只靠调度否决。 |
+| `price_source` | `openrouter` | 单价来源。`openrouter` 用其公开价目表（无需 key，每 `price_refresh_hours` 刷一次）；`off` 只用 `price_overrides` + 兜底价。 |
+| `price_refresh_hours` | `24` | 价目表刷新间隔，最小 15 分钟。抓取失败保留上一份缓存，不改变计费。 |
+| `unpriced_policy` | `fallback` | 价目表查不到模型时：`fallback` 按兜底价计费（不是免费），`skip` 不计费但计入「未定价次数」。 |
+| `fallback_price` | prompt 3 / completion 15 / cache_read 0.3 / cache_write 3.75 | 兜底价，单位美元/百万 token。 |
+| `price_overrides` | 空 | 按模型手工定价，优先级高于价目表。 |
+| `channel_multiplier` | `1` | 整体价格系数。 |
+| `on_all_exhausted` | `reject` | 该路由上所有候选都过额时：`reject` 返回额度不足；`pass` 交回网关继续调度（会超支）。 |
+| `state_file` | `plugins/cpa-credential-budget-state.json` | 账本与价目表缓存，相对路径按 CPA 工作目录解析。 |
+| `debug` | `false` | 记录每次调度决策。 |
+
+```yaml
+      price_overrides:
+        claude-sonnet-4-5:
+          prompt: 3
+          completion: 15
+          cache_read: 0.3
+          cache_write: 3.75
+        "gpt-5.1":
+          prompt: 1.25
+          completion: 10
+```
+
+---
+
+## 计费口径
+
+沿用 Oh My CPA 的口径：输入、输出、缓存读、缓存写四个桶，单价按**美元/百万 token**，整数微美元（µUSD）累加，全程用有理数精确计算，不做浮点累加。
+
+- 未缓存输入 = `输入 token − 缓存读 − 缓存写`
+- 输出 = `输出 token`（若推理 token 更大则取推理 token）
+- 缓存读 / 缓存写分别按自己的单价
+- 未定价模型**默认按兜底价计费**，面板会显示「N 次未定价」，方便你补 `price_overrides`
+
+单价参考 Oh My CPA 的做法，取 OpenRouter 公开模型列表（`prompt` / `completion` / `input_cache_read` / `input_cache_write`）。
+
+---
+
+## 面板
+
+`插件 → 凭证额度`。表格里每个凭证一行：已用 / 额度 / 进度 / 状态 / 最近使用，行内可改额度、可解封；顶部是汇总与价目表状态；底部是操作记录（改额度、熔断、禁用、解封都有留痕）。
+
+- **解封 = 清零已用 + 解除插件设的 disabled**，等于重发一张新额度。
+- **提额不会自动解封**：额度改高了但凭证仍停用，面板会提示你再点一次「解封」。这是刻意的——解封只有人能触发。
+- 插件只解除**自己**设的 disabled；如果这个凭证是你手动关掉的，解封不会替你打开。
+
+---
+
+## 行为边界（重要）
+
+1. **硬上限做不到 100% 不超。** 预检在请求前、结算在响应后，进行中的请求会把额度花穿一点（典型是最后一次请求的整笔费用）。要绝对不超只能按 `max_tokens` 预留，插件没这么做。
+2. **运行时凭证只能靠调度拦。** `api-keys` 里的 key 没有物理文件，`host.auth.save` 不适用，面板会显示「禁用失败」。这类凭证靠 ② 兜住。
+3. **全部凭证过额时，默认直接拒绝**（HTTP 500 + `credential_budget_exhausted`）。CPA 的调度拒绝没有独立状态码位，所以是 500 而不是 429；要让它继续调度就设 `on_all_exhausted: pass`。
+4. **写 disabled 会把整份凭证 JSON 写回**，`access_token` / `refresh_token` 等字段原样保留。极端情况下若恰好有 token 刷新发生在读与写之间，写回的是稍旧的一份 token——凭证本来就会被禁用，解封后 CPA 会自行刷新。
+5. **额度只在账本里**，删掉状态文件等于全部重置（未解封的 disabled 不会自动恢复）。
+6. 插件进程内运行在 CPA 里，`host.auth.save` 失败不会拖垮请求，只会记录到面板的 `disable_error`。
+
+---
+
+## 状态文件
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "openai-compatibility:mock:68bc4482762f": {
+      "key": "openai-compatibility:mock:68bc4482762f",
+      "provider": "openai-compatible-mock",
+      "limit_micro_usd": 5000000,
+      "spent_micro_usd": 6000000,
+      "requests": 2,
+      "exhausted": true,
+      "disabled_by_plugin": true,
+      "limit_source": "manual"
+    }
+  },
+  "price_book": { "source": "openrouter", "fetched_at": "...", "models": { } },
+  "audit": [ ]
+}
+```
+
+写入是「临时文件 + fsync + rename」。读到的文件损坏或版本更高时，插件**停写而不是覆盖**，面板顶部会显示红色的「账本写入已暂停」。每 2 秒合并落盘一次，熔断与解封会立即落盘。
+
+---
+
+## 故障排查
+
+| 现象 | 原因 |
+| --- | --- |
+| 面板看不到凭证 | 先点「同步凭证」；或该凭证还没被用过（记账是请求结算后才产生） |
+| 「禁用失败：credential not found in host.auth.list」 | 这是运行时凭证（`api-keys` 配置项），正常，靠调度否决 |
+| 额度到了还在跑 | 检查 `enforce`、`auto_disable`；开 `debug` 看 `scheduler.pick` 是否被调用 |
+| 价目表 0 个模型 | 出网失败或 `price_source: off`；看面板里的 `last_error` |
+| 全部凭证停了之后报 500 | 默认行为，见边界 3 |
+
+---
+
+## 开发
+
+```sh
+make test      # go test -race ./...
+make build     # dist/cpa-credential-budget.so
+make package   # 按发行包命名打 zip，用于插件商店
+```
+
+`.so` 必须用 `-tags cshared -buildmode=c-shared` 构建，导出 `cliproxy_plugin_init` / `cliproxyPluginCall` / `cliproxyPluginFree` / `cliproxyPluginShutdown`。
+
+核对 ABI：插件按 CPA schema version 10 编写，用到 `usage.handle`、`management.register` / `management.handle`、`scheduler.pick` 与 `host.auth.list` / `host.auth.get` / `host.auth.save` / `host.log`。
+
+## License
+
+MIT

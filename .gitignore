@@ -1,0 +1,8 @@
+dist/
+*.so
+*.dylib
+*.dll
+*.h
+plugins/
+cpa-credential-budget-state.json
+.DS_Store

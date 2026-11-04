@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  check:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check tag matches plugin version
+        run: |
+          version="$(sed -n 's/.*PluginVersion = "\(.*\)".*/\1/p' internal/plugin/plugin.go)"
+          test "$version" = "${RELEASE_TAG#v}" || {
+            echo "tag ${RELEASE_TAG#v} does not match PluginVersion $version" >&2
+            exit 1
+          }
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Validate the plugin registry document
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          doc = json.loads(pathlib.Path("registry.json").read_text())
+          assert doc["schema_version"] in (1, 2)
+          for entry in doc["plugins"]:
+              for field in ("id", "name", "description", "author", "repository"):
+                  assert entry.get(field), f"{field} missing in {entry}"
+              assert entry["repository"].startswith("https://github.com/")
+          print("registry.json ok")
+          PY
+
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, arch: amd64, runner: ubuntu-24.04, ext: so, image: quay.io/pypa/manylinux2014_x86_64 }
+          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm, ext: so, image: quay.io/pypa/manylinux2014_aarch64 }
+          - { os: darwin, arch: amd64, runner: macos-13, ext: dylib }
+          - { os: darwin, arch: arm64, runner: macos-14, ext: dylib }
+          - { os: windows, arch: amd64, runner: windows-2022, ext: dll }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # manylinux2014 (glibc 2.17) keeps the plugin loadable on older Linux hosts,
+      # and GOAMD64=v1 avoids emitting instructions older CPUs trap on (SIGILL).
+      - name: Build Linux plugin
+        if: matrix.os == 'linux'
+        run: |
+          mkdir -p dist
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$PWD:/src" -w /src -v "$(go env GOROOT):/opt/go:ro" \
+            -e GOROOT=/opt/go -e HOME=/tmp -e GOFLAGS=-buildvcs=false \
+            -e GOAMD64=${{ matrix.arch == 'amd64' && 'v1' || '' }} \
+            ${{ matrix.image }} \
+            /opt/go/bin/go build -trimpath -ldflags="-s -w" -tags cshared -buildmode=c-shared \
+              -o dist/cpa-credential-budget.so ./cmd/cpa-credential-budget
+
+      - name: Build plugin
+        if: matrix.os != 'linux'
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -trimpath -ldflags="-s -w" -tags cshared -buildmode=c-shared \
+            -o dist/cpa-credential-budget.${{ matrix.ext }} ./cmd/cpa-credential-budget
+
+      # The CPA plugin store expects <id>_<version>_<os>_<arch>.zip with the
+      # library at the archive root.
+      - name: Package
+        if: matrix.os != 'windows'
+        run: |
+          name="cpa-credential-budget_${RELEASE_TAG#v}_${{ matrix.os }}_${{ matrix.arch }}"
+          zip -j "$name.zip" dist/cpa-credential-budget.${{ matrix.ext }}
+
+      - name: Package
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $name = "cpa-credential-budget_$($env:RELEASE_TAG.TrimStart('v'))_windows_amd64"
+          Compress-Archive -Path dist/cpa-credential-budget.dll -DestinationPath "$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-${{ matrix.arch }}
+          path: cpa-credential-budget_*.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: assets
+        run: sha256sum *.zip > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: assets/*
+          generate_release_notes: true
