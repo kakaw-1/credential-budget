@@ -1,4 +1,4 @@
-PLUGIN_ID     := cpa-credential-budget
+PLUGIN_ID     := credential-budget
 GOOS          ?= $(shell go env GOOS)
 GOARCH        ?= $(shell go env GOARCH)
 VERSION       := $(shell sed -n 's/.*PluginVersion = "\(.*\)".*/\1/p' internal/plugin/plugin.go)

@@ -15,7 +15,7 @@ import (
 const (
 	// PluginID is the stable plugin identifier. The shared library file name,
 	// the plugins.configs key and the management routes all derive from it.
-	PluginID = "cpa-credential-budget"
+	PluginID = "credential-budget"
 	// PluginVersion is the release version. A tag must match it.
 	PluginVersion = "0.1.0"
 	// ABIVersion is the native C ABI version this plugin was built against.
@@ -174,7 +174,7 @@ func pluginRegistration() registration {
 			Name:             PluginID,
 			Version:          PluginVersion,
 			Author:           "kakaw-1",
-			GitHubRepository: "https://github.com/kakaw-1/cpa-plugin-credential-budget",
+			GitHubRepository: "https://github.com/kakaw-1/credential-budget",
 			Logo:             logoSVG,
 			ConfigFields: []configField{
 				{Name: "default_limit_usd", Type: "number", Default: 0, Description: "新建凭证的默认一次性额度（美元）。0 表示不限额，仅在面板单独设置时生效。"},

@@ -19,8 +19,8 @@
 启动：
 
 ```
-pluginhost: plugin loaded    plugin_id=cpa-credential-budget path=plugins/linux/amd64/cpa-credential-budget.so
-pluginhost: plugin registered plugin_id=cpa-credential-budget version=0.1.0
+pluginhost: plugin loaded    plugin_id=credential-budget path=plugins/linux/amd64/credential-budget.so
+pluginhost: plugin registered plugin_id=credential-budget version=0.1.0
 ```
 
 请求 1–3 通过，key A 在第 2 次请求后过额：
@@ -48,7 +48,7 @@ scheduler.pick: all 2 candidates for provider  are over budget
 POST /v1/chat/completions 500 {"error":{"message":"credential_budget_exhausted: all credentials for this route have consumed their one-time budget", ...}}
 ```
 
-面板 API（`GET /v0/management/plugins/cpa-credential-budget/state`）：
+面板 API（`GET /v0/management/plugins/credential-budget/state`）：
 
 ```json
 {"credentials":[
@@ -104,7 +104,7 @@ $ go test -race ./...
 === RUN   TestLedgerSurvivesReload                       --- PASS
 === RUN   TestLimitEditReportsPendingUnseal              --- PASS
 PASS
-ok  github.com/kakaw-1/cpa-plugin-credential-budget/internal/plugin  1.064s
+ok  github.com/kakaw-1/credential-budget/internal/plugin  1.064s
 ```
 
 ## 未覆盖

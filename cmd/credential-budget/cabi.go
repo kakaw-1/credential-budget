@@ -63,7 +63,7 @@ import (
 	"encoding/json"
 	"unsafe"
 
-	"github.com/kakaw-1/cpa-plugin-credential-budget/internal/plugin"
+	"github.com/kakaw-1/credential-budget/internal/plugin"
 )
 
 //export cliproxy_plugin_init

@@ -83,7 +83,7 @@ jobs:
             -e GOAMD64=${{ matrix.arch == 'amd64' && 'v1' || '' }} \
             ${{ matrix.image }} \
             /opt/go/bin/go build -trimpath -ldflags="-s -w" -tags cshared -buildmode=c-shared \
-              -o dist/cpa-credential-budget.so ./cmd/cpa-credential-budget
+              -o dist/credential-budget.so ./cmd/credential-budget
 
       - name: Build plugin
         if: matrix.os != 'linux'
@@ -92,27 +92,27 @@ jobs:
           CGO_ENABLED: "1"
         run: |
           go build -trimpath -ldflags="-s -w" -tags cshared -buildmode=c-shared \
-            -o dist/cpa-credential-budget.${{ matrix.ext }} ./cmd/cpa-credential-budget
+            -o dist/credential-budget.${{ matrix.ext }} ./cmd/credential-budget
 
       # The CPA plugin store expects <id>_<version>_<os>_<arch>.zip with the
       # library at the archive root.
       - name: Package
         if: matrix.os != 'windows'
         run: |
-          name="cpa-credential-budget_${RELEASE_TAG#v}_${{ matrix.os }}_${{ matrix.arch }}"
-          zip -j "$name.zip" dist/cpa-credential-budget.${{ matrix.ext }}
+          name="credential-budget_${RELEASE_TAG#v}_${{ matrix.os }}_${{ matrix.arch }}"
+          zip -j "$name.zip" dist/credential-budget.${{ matrix.ext }}
 
       - name: Package
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          $name = "cpa-credential-budget_$($env:RELEASE_TAG.TrimStart('v'))_windows_amd64"
-          Compress-Archive -Path dist/cpa-credential-budget.dll -DestinationPath "$name.zip"
+          $name = "credential-budget_$($env:RELEASE_TAG.TrimStart('v'))_windows_amd64"
+          Compress-Archive -Path dist/credential-budget.dll -DestinationPath "$name.zip"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-${{ matrix.arch }}
-          path: cpa-credential-budget_*.zip
+          path: credential-budget_*.zip
           if-no-files-found: error
 
   release:

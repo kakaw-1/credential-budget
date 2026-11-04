@@ -1,10 +1,10 @@
 #!/bin/sh
-# Install the latest cpa-credential-budget release into ./plugins/<os>/<arch>.
+# Install the latest credential-budget release into ./plugins/<os>/<arch>.
 # Run it in the CLIProxyAPI working directory.
 set -eu
 
-repo="kakaw-1/cpa-plugin-credential-budget"
-name="cpa-credential-budget"
+repo="kakaw-1/credential-budget"
+name="credential-budget"
 
 fail() {
   echo "$name: $*" >&2

@@ -1,4 +1,4 @@
-module github.com/kakaw-1/cpa-plugin-credential-budget
+module github.com/kakaw-1/credential-budget
 
 go 1.24
 

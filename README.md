@@ -1,4 +1,4 @@
-# cpa-plugin-credential-budget
+# credential-budget
 
 给 CLIProxyAPI 的上游凭证加一道**一次性美元额度**：给某个 key 设 $5，花到 $5 就停止使用，下游请求不会再落到它身上。**不会自动重置**，只能由人在面板上手动解封。
 
@@ -36,10 +36,10 @@
 
 ### 插件商店
 
-CPA / OMC 的插件商店搜索 `cpa-credential-budget` 安装，然后在插件配置里启用。商店地址可以加：
+CPA / OMC 的插件商店搜索 `credential-budget` 安装，然后在插件配置里启用。商店地址可以加：
 
 ```
-https://raw.githubusercontent.com/kakaw-1/cpa-plugin-credential-budget/main/registry.json
+https://raw.githubusercontent.com/kakaw-1/credential-budget/main/registry.json
 ```
 
 ### 手动安装
@@ -47,7 +47,7 @@ https://raw.githubusercontent.com/kakaw-1/cpa-plugin-credential-budget/main/regi
 在 CPA 的工作目录执行：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kakaw-1/cpa-plugin-credential-budget/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/kakaw-1/credential-budget/main/install.sh | sh
 ```
 
 或者从 Releases 下载对应平台的压缩包，把里面的 `.so` 放到 `plugins/linux/amd64/`（macOS 用 `plugins/darwin/<arch>/`，扩展名 `.dylib`）。
@@ -59,7 +59,7 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
-    cpa-credential-budget:
+    credential-budget:
       enabled: true
       priority: 1
       default_limit_usd: 5      # 新凭证默认额度（美元）；0 = 不限额
@@ -89,7 +89,7 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 | `price_overrides` | 空 | 按模型手工定价，优先级高于价目表。 |
 | `channel_multiplier` | `1` | 整体价格系数。 |
 | `on_all_exhausted` | `reject` | 该路由上所有候选都过额时：`reject` 返回额度不足；`pass` 交回网关继续调度（会超支）。 |
-| `state_file` | `plugins/cpa-credential-budget-state.json` | 账本与价目表缓存，相对路径按 CPA 工作目录解析。 |
+| `state_file` | `plugins/credential-budget-state.json` | 账本与价目表缓存，相对路径按 CPA 工作目录解析。 |
 | `debug` | `false` | 记录每次调度决策。 |
 
 ```yaml
@@ -192,7 +192,7 @@ grep credential-budget <CPA 日志>   # 应看到 plugin loaded / plugin registe
 
 ```sh
 make test      # go test -race ./...
-make build     # dist/cpa-credential-budget.so
+make build     # dist/credential-budget.so
 make package   # 按发行包命名打 zip，用于插件商店
 ```
 

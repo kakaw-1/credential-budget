@@ -4,5 +4,5 @@ dist/
 *.dll
 *.h
 plugins/
-cpa-credential-budget-state.json
+credential-budget-state.json
 .DS_Store

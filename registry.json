@@ -2,13 +2,13 @@
   "schema_version": 2,
   "plugins": [
     {
-      "id": "cpa-credential-budget",
+      "id": "credential-budget",
       "name": "凭证额度",
       "description": "按上游凭证限制一次性美元额度，达到额度即停止该凭证的调度，只能手动解封。 / One-time USD budget per upstream credential: stop the credential when its budget is consumed, resume only by hand.",
       "author": "kakaw-1",
       "version": "0.1.0",
-      "repository": "https://github.com/kakaw-1/cpa-plugin-credential-budget",
-      "homepage": "https://github.com/kakaw-1/cpa-plugin-credential-budget",
+      "repository": "https://github.com/kakaw-1/credential-budget",
+      "homepage": "https://github.com/kakaw-1/credential-budget",
       "license": "MIT",
       "tags": [
         "Management",
